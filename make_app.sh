@@ -23,6 +23,12 @@ mkdir -p "$APP/Contents/Resources"
 
 cp "$BIN" "$APP/Contents/MacOS/$EXEC_NAME"
 
+# ---- game controller mapping DB (community + BETOP C3 override) -----------
+if [ -f "src/gamecontrollerdb.txt" ]; then
+  cp "src/gamecontrollerdb.txt" "$APP/Contents/Resources/gamecontrollerdb.txt"
+  echo "==> bundled gamecontrollerdb.txt"
+fi
+
 # ---- Info.plist -----------------------------------------------------------
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

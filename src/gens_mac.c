@@ -335,6 +335,41 @@ typedef struct {
 static pad_t pads[8];
 static int  npads = 0;
 
+/* Load community + device-specific game-controller mappings so third-party
+   pads (notably BETOP C3, which SDL2 2.32.8's bundled DB doesn't know) are
+   recognised as real Game Controllers with the correct button layout rather
+   than falling back to a raw joystick whose hard-coded button order scrambles
+   the face buttons. MUST run before gamepads_enumerate(). */
+static void load_gamecontroller_mappings(void)
+{
+  /* Community SDL_GameControllerDB (best-effort; ignore if the file is absent
+     or unreadable). Helps every other pad work out of the box too. */
+  const char *cands[] = { "gamecontrollerdb.txt", "src/gamecontrollerdb.txt", NULL };
+  char path[1024];
+  const char *base = SDL_GetBasePath();
+  if (base) {
+    snprintf(path, sizeof(path), "%sgamecontrollerdb.txt", base);
+    SDL_GameControllerAddMappingsFromFile(path);                 /* next to exe */
+    snprintf(path, sizeof(path), "%s../Resources/gamecontrollerdb.txt", base);
+    SDL_GameControllerAddMappingsFromFile(path);                 /* inside .app */
+    SDL_free((void *)base);
+  }
+  for (int i = 0; cands[i]; i++)
+    SDL_GameControllerAddMappingsFromFile(cands[i]);
+
+  /* BETOP C3 (vendor 0x20bc / product 0x0de0) on macOS -- exact GUID seen on
+     this machine. Added LAST so it overrides any community entry. Note the
+     triggers are mapped to the trigger AXES (lefttrigger:b6/righttrigger:b7),
+     so the existing axis-based LT/RT handling keeps working unchanged. */
+  static const char betop_c3[] =
+    "03004c4ebc200000e00d000014010000,BETOP C3,"
+    "a:b2,b:b1,back:b8,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,"
+    "leftshoulder:b4,leftstick:b10,lefttrigger:b6,leftx:a0,lefty:a1,"
+    "rightshoulder:b5,rightstick:b11,righttrigger:b7,rightx:a2,righty:a3,"
+    "start:b9,x:b3,y:b0,";
+  SDL_GameControllerAddMapping(betop_c3);
+}
+
 static void gamepads_enumerate(void)
 {
   for (int i = 0; i < npads; i++) {
@@ -706,6 +741,7 @@ int main(int argc, char **argv)
     return 1;
   }
 
+  load_gamecontroller_mappings();
   gamepads_enumerate();   /* open any connected game controllers */
 
   if (!video_init()) { SDL_Quit(); return 1; }

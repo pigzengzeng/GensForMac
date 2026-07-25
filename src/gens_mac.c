@@ -559,15 +559,25 @@ static int pad_button_down(const pad_t *pd, SDL_GameControllerButton gb)
         SDL_Joystick *j = SDL_GameControllerGetJoystick(pd->gc);
         Uint8 hat = (j && SDL_JoystickNumHats(j) > 0)
                       ? SDL_JoystickGetHat(j, 0) : SDL_HAT_CENTERED;
+        /* HJC/BETOP C3 (and many cheap pads) report the d-pad on the FIRST TWO
+           RAW axes (the left-stick axes), not as DPAD buttons or a hat -- so
+           read those underlying raw axes directly too. This is belt-and-
+           -suspenders: it works whether or not the mapping assigns the d-pad to
+           the SDL left-stick axes (leftx:a0/lefty:a1). We deliberately only
+           ever read axes 0/1 here (the primary stick), never high-numbered
+           "extra" axes, because an idle extra axis can rest at an extreme and
+           would jam a direction on permanently. */
+        int rax0 = (j && SDL_JoystickNumAxes(j) > 1) ? SDL_JoystickGetAxis(j, 0) : 0;
+        int rax1 = (j && SDL_JoystickNumAxes(j) > 1) ? SDL_JoystickGetAxis(j, 1) : 0;
         switch (gb) {
           case SDL_CONTROLLER_BUTTON_DPAD_UP:
-            return (ly < -AXIS_ON) || (hat & SDL_HAT_UP);
+            return (ly < -AXIS_ON) || (rax1 < -AXIS_ON) || (hat & SDL_HAT_UP);
           case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
-            return (ly >  AXIS_ON) || (hat & SDL_HAT_DOWN);
+            return (ly >  AXIS_ON) || (rax1 >  AXIS_ON) || (hat & SDL_HAT_DOWN);
           case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
-            return (lx < -AXIS_ON) || (hat & SDL_HAT_LEFT);
+            return (lx < -AXIS_ON) || (rax0 < -AXIS_ON) || (hat & SDL_HAT_LEFT);
           case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
-            return (lx >  AXIS_ON) || (hat & SDL_HAT_RIGHT);
+            return (lx >  AXIS_ON) || (rax0 >  AXIS_ON) || (hat & SDL_HAT_RIGHT);
           default: return 0;
         }
       }

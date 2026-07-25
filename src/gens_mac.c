@@ -358,12 +358,19 @@ static void load_gamecontroller_mappings(void)
     SDL_GameControllerAddMappingsFromFile(cands[i]);
 
   /* BETOP C3 (vendor 0x20bc / product 0x0de0) on macOS -- exact GUID seen on
-     this machine. Added LAST so it overrides any community entry. Note the
-     triggers are mapped to the trigger AXES (lefttrigger:b6/righttrigger:b7),
-     so the existing axis-based LT/RT handling keeps working unchanged. */
+     this machine. Added LAST so it overrides any community entry. The face /
+     shoulder / trigger / stick buttons are mapped here (these button mappings
+     are reliable). The d-pad is deliberately LEFT OUT of the mapping: in this
+     SDL2 2.32.8 macOS build the hat->DPAD-button translation does not fire, and
+     referencing the hat makes SDL "consume" it so the underlying
+     SDL_JoystickGetHat() returns centred. By leaving dpup/dpdown/... out, the
+     d-pad stays readable as a raw hat 0, which pad_button_down() reads directly
+     (see the DPAD case in pad_button_down). Triggers map to the trigger AXES
+     (lefttrigger:b6/righttrigger:b7) so the existing axis-based LT/RT handling
+     keeps working unchanged. */
   static const char betop_c3[] =
     "03004c4ebc200000e00d000014010000,BETOP C3,"
-    "a:b2,b:b1,back:b8,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,"
+    "a:b2,b:b1,back:b8,"
     "leftshoulder:b4,leftstick:b10,lefttrigger:b6,leftx:a0,lefty:a1,"
     "rightshoulder:b5,rightstick:b11,righttrigger:b7,rightx:a2,righty:a3,"
     "start:b9,x:b3,y:b0,";

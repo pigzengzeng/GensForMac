@@ -14,7 +14,7 @@ extern t_settings settings;   /* defined in settings.c */
 
    Model: each on-screen PORT (1..8) has its own SOURCE -- the keyboard, a
    specific connected gamepad, or NONE -- plus its own keyboard/gamepad button
-   bindings and controller type. Two ports may pick the SAME gamepad, which is
+   bindings. Two ports may pick the SAME gamepad, which is
    how "one pad controls two players" (一控二) is achieved. */
 
 typedef enum { SCR_CTRL, SCR_REDEF } screen_t;
@@ -84,6 +84,7 @@ void ui_handle_key(SDL_Keycode key)
           int cnt = src_option_count();
           idx = (idx + d + cnt) % cnt;
           settings.port_dev[sel] = src_option_to_dev(idx);
+          settings_apply();   /* re-derive USED/UNUSED + push to core */
           settings_save();
         }
       }
@@ -95,13 +96,12 @@ void ui_handle_key(SDL_Keycode key)
 
     case SCR_REDEF:
       if (key == SDLK_ESCAPE) { screen = SCR_CTRL; sel = redef_port; capture_btn = -1; break; }
-      if (key == SDLK_UP)        sel = (sel + 14) % 15;
-      else if (key == SDLK_DOWN) sel = (sel + 1) % 15;
+      if (key == SDLK_UP)        sel = (sel + 13) % 14;   /* 12 buttons + BACK + RESET */
+      else if (key == SDLK_DOWN) sel = (sel + 1) % 14;
       else if (key == SDLK_RETURN || key == SDLK_SPACE) {
-        if (sel == 0) { /* TYPE row: no capture */ }
-        else if (sel == 13) { screen = SCR_CTRL; sel = redef_port; }   /* BACK */
-        else if (sel == 14) { settings_reset_port(redef_port); }        /* RESET */
-        else { capture_btn = sel - 1; }   /* button index 0..11; next key/pad binds */
+        if (sel == 12) { screen = SCR_CTRL; sel = redef_port; }   /* BACK */
+        else if (sel == 13) { settings_reset_port(redef_port); }   /* RESET */
+        else { capture_btn = sel; }   /* button 0..11; next key/pad binds */
       }
       break;
   }
@@ -122,6 +122,30 @@ void ui_handle_button(SDL_GameControllerButton button)
 static void put(SDL_Renderer *r, int x, int y, const char *s, int sc, SDL_Color c)
 {
   font_draw(r, x, y, s, sc, c);
+}
+
+/* Draw `s` right-aligned so its right edge sits at x_right, but never let it
+   extend left past (x_right - max_w). Long gamepad names are truncated with
+   an ellipsis so they cannot overlap the PORT/type labels on the left. */
+static void put_right_clip(SDL_Renderer *r, int x_right, int y,
+                           const char *s, int sc, SDL_Color c, int max_w)
+{
+  int w = font_width(s, sc);
+  if (w <= max_w) { put(r, x_right - w, y, s, sc, c); return; }
+  int ell  = font_width("...", sc);
+  int avail = max_w - ell;
+  char buf[64];
+  strncpy(buf, s, sizeof(buf) - 1);
+  buf[sizeof(buf) - 1] = 0;
+  while (font_width(buf, sc) > avail && strlen(buf) > 1)
+    buf[strlen(buf) - 1] = 0;
+  if (strlen(buf) + 3 < sizeof(buf)) {
+    buf[strlen(buf)] = '.';
+    buf[strlen(buf)] = '.';
+    buf[strlen(buf)] = '.';
+    buf[strlen(buf)] = 0;
+  }
+  put(r, x_right - font_width(buf, sc), y, buf, sc, c);
 }
 
 void ui_render(SDL_Renderer *r)
@@ -154,16 +178,14 @@ void ui_render(SDL_Renderer *r)
       snprintf(lbl, sizeof(lbl), "PORT %d", i + 1);
       put(r, lx, y, lbl, scale, (i == sel) ? hi : norm);
 
-      /* controller type, dim, just right of the label */
-      char t[40];
-      snprintf(t, sizeof(t), "[%s]", port_type_name(settings.port_type[i]));
-      put(r, lx + 96, y + 4, t, 1, dim);
-
-      /* source on the right */
+      /* source on the right; clip long gamepad names so they never overlap
+         the PORT label on the left */
       const char *sn = dev_label(settings.port_dev[i]);
       SDL_Color scol = (settings.port_dev[i] == PORT_DEV_KEYBOARD) ? kbd
                      : (settings.port_dev[i] == PORT_DEV_NONE)     ? dim : pad;
-      put(r, rx - font_width(sn, scale), y, sn, scale, (i == sel) ? hi : scol);
+      int maxw = rx - (lx + 200);   /* keep clear of the PORT label */
+      if (maxw < 40) maxw = 40;
+      put_right_clip(r, rx, y, sn, scale, (i == sel) ? hi : scol, maxw);
       y += 32;
     }
     put(r, lx, y, "DONE", scale, 8 == sel ? hi : norm);
@@ -222,23 +244,15 @@ void ui_render(SDL_Renderer *r)
              dev_label(settings.port_dev[redef_port]));
     put(r, cx - font_width(hdr, scale)/2, 28, hdr, scale, title);
 
-    /* row 0: controller type */
-    put(r, lx, 64,
-        (sel == 0) ? "> TYPE" : "  TYPE", scale, (sel == 0) ? hi : norm);
-    put(r, rx - font_width(port_type_name(settings.port_type[redef_port]), scale),
-        64, port_type_name(settings.port_type[redef_port]), scale,
-        (sel == 0) ? hi : norm);
-    put(r, lx + 150, 68, "LEFT/RIGHT", 1, dim);
-
     /* column headers */
     int kx = cx - 150;        /* KEY column */
     int px = cx + 40;         /* PAD column */
-    put(r, kx, 90, "KEY", 1, kbd);
-    put(r, px, 90, "PAD", 1, pad);
+    put(r, kx, 56, "KEY", 1, kbd);
+    put(r, px, 56, "PAD", 1, pad);
 
-    int y = 108;
+    int y = 74;
     for (int b = 0; b < 12; b++) {
-      int row = b + 1;        /* row index in SEL space */
+      int row = b;            /* row index in SEL space (0..11) */
       const char *kn = SDL_GetScancodeName(settings.keymap[redef_port][b]);
       if (!kn || kn[0] == 0) kn = "-";
       const char *pn = gpad_button_name(settings.gpadmap[redef_port][b]);
@@ -250,13 +264,13 @@ void ui_render(SDL_Renderer *r)
       put(r, px, y, pn, scale, (row == sel) ? pad : norm);
       y += 24;
     }
-    put(r, lx, y, (13 == sel) ? "> BACK" : "  BACK", scale, 13 == sel ? hi : norm);
-    put(r, lx, y + 24, (14 == sel) ? "> RESET DEFAULTS" : "  RESET DEFAULTS",
-        scale, 14 == sel ? hi : (SDL_Color){255, 150, 120, 255});
+    put(r, lx, y, (12 == sel) ? "> BACK" : "  BACK", scale, 12 == sel ? hi : norm);
+    put(r, lx, y + 24, (13 == sel) ? "> RESET DEFAULTS" : "  RESET DEFAULTS",
+        scale, 13 == sel ? hi : (SDL_Color){255, 150, 120, 255});
     if (capture_btn >= 0)
       put(r, lx, y + 54, "PRESS KEY OR GAMEPAD BUTTON (ESC CANCEL)", 1, hi);
     else
-      put(r, lx, y + 54, "LEFT/RIGHT: TYPE   ENTER: SET   ESC: BACK", 1, dim);
+      put(r, lx, y + 54, "ENTER: SET KEY/PAD   ESC: BACK", 1, dim);
   }
 
   SDL_RenderPresent(r);

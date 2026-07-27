@@ -34,9 +34,11 @@
 #define SC_50  2
 #define SC_100 3
 
-/* controller type */
+/* controller type. The emulator always presents a 6-button pad (which is
+   backward-compatible with 3-button games), so there is no longer a user
+   choice between 3- and 6-button -- a port is either WIRED (6-button) or
+   UNUSED. The active/inactive state is derived from the port's SOURCE. */
 #define CT_NONE     0
-#define CT_3BUTTON  1
 #define CT_6BUTTON  2
 
 /* Per-port input SOURCE. Each on-screen port is driven by exactly one source:

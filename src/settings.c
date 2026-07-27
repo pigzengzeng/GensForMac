@@ -51,7 +51,6 @@ const char *port_type_name(int t)
 {
   switch (t) {
     case CT_NONE:     return "NONE";
-    case CT_3BUTTON:  return "3-BUTTON";
     case CT_6BUTTON:  return "6-BUTTON";
     default:          return "?";
   }
@@ -133,7 +132,10 @@ void settings_init_defaults(void)
        none) by settings_resolve_auto() after pads are enumerated, so a freshly
        plugged controller "just works" as player 1 without manual setup. */
     settings.port_dev[p]  = PORT_DEV_AUTO;
-    settings.port_type[p] = (p < 2) ? CT_6BUTTON : CT_NONE;
+    /* Every wired port is a 6-button pad (compatible with 3-button games too),
+       so the type is fixed; settings_apply() derives USED vs UNUSED from the
+       source. */
+    settings.port_type[p] = CT_6BUTTON;
     set_keymap_defaults(p);   /* every port gets a keyboard layout so any port
                                  can be switched to KEYBOARD instantly */
     set_gpadmap_defaults(p);
@@ -147,7 +149,7 @@ void settings_init_defaults(void)
 void settings_reset_port(int p)
 {
   if (p < 0 || p >= NUM_PORTS) return;
-  settings.port_type[p] = (p < 2) ? CT_6BUTTON : CT_NONE;
+  settings.port_type[p] = CT_6BUTTON;
   set_gpadmap_defaults(p);
   set_keymap_defaults(p);   /* any port may be switched to KEYBOARD, so every
                                port keeps a usable keyboard layout */
@@ -267,12 +269,13 @@ void settings_apply(void)
   int used[8] = {0};
   for (int mp = 0; mp < NUM_PORTS; mp++) {
     int pad = port_to_pad[mp];
-    if (settings.port_type[mp] != CT_NONE) used[pad] = 1;
-    switch (settings.port_type[mp]) {
-      case CT_3BUTTON: config.input[pad].padtype = DEVICE_PAD3B; break;
-      case CT_6BUTTON: config.input[pad].padtype = DEVICE_PAD6B; break;
-      default:         config.input[pad].padtype = auto_mask;  break; /* NONE -> auto */
-    }
+    /* A wired port is always a 6-button pad (backward-compatible with 3-button
+       games); the only state that matters is USED (any source but NONE) vs
+       UNUSED (NONE). Derived from the source so there is no separate setting. */
+    int t = (settings.port_dev[mp] == PORT_DEV_NONE) ? CT_NONE : CT_6BUTTON;
+    settings.port_type[mp] = t;
+    if (t != CT_NONE) used[pad] = 1;
+    config.input[pad].padtype = (t == CT_NONE) ? auto_mask : DEVICE_PAD6B;
   }
 
   /* enable each physical console port if any of its four pad slots is used.

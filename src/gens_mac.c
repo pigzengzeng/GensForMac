@@ -891,8 +891,9 @@ int main(int argc, char **argv)
     fprintf(stderr, "[selftest] MENU: built native menu bar OK\n");
 
     /* on-screen controller overlay smoke test: open it, render both screens,
-       change a port type and capture one key, then close it. (selftest runs
-       with a temp HOME so settings_save() writes there, not the user's rc) */
+       cycle a port source and capture one key + one pad button, then close it.
+       (selftest runs with a temp HOME so settings_save() writes there, not the
+       user's rc) */
     {
       int cok = 1;
       mac_action_open_controls();                 /* ui_open() */
@@ -909,21 +910,20 @@ int main(int argc, char **argv)
       ui_handle_key(SDLK_RIGHT);
       if (settings.port_dev[0] != src_before) cok = 0;
 
-      /* PORT 2 (sel -> 1): enter REDEF, bind keyboard key to UP (button 0) */
+      /* PORT 2 (sel -> 1): enter REDEF, bind keyboard key to UP (button 0).
+         After entering SCR_REDEF sel=0 is already the UP row (no TYPE row). */
       ui_handle_key(SDLK_DOWN);                    /* sel 0 -> 1 (PORT 2) */
       ui_handle_key(SDLK_RETURN);                  /* enter SCR_REDEF redef_port=1 */
-      ui_handle_key(SDLK_DOWN);                    /* sel 0 (TYPE) -> 1 (UP row) */
-      ui_handle_key(SDLK_RETURN);                  /* begin capture, btn 0 */
+      ui_handle_key(SDLK_RETURN);                  /* begin capture on btn 0 (UP) */
       ui_handle_key(SDLK_KP1);                     /* bind KP_1 */
       ui_handle_key(SDLK_ESCAPE);                  /* back to SCR_CTRL (sel=1) */
 
       /* PORT 3 (sel -> 2): bind gamepad A to UP (btn 0), RT to DOWN (btn 1) */
       ui_handle_key(SDLK_DOWN);                    /* sel 1 -> 2 (PORT 3) */
       ui_handle_key(SDLK_RETURN);                  /* enter SCR_REDEF redef_port=2 */
-      ui_handle_key(SDLK_DOWN);                    /* sel 0 -> 1 (UP row) */
-      ui_handle_key(SDLK_RETURN);                  /* capture btn 0 */
+      ui_handle_key(SDLK_RETURN);                  /* capture btn 0 (UP) */
       ui_handle_button(SDL_CONTROLLER_BUTTON_A);   /* bind gamepad A */
-      ui_handle_key(SDLK_DOWN);                    /* sel 1 -> 2 (DOWN row) */
+      ui_handle_key(SDLK_DOWN);                    /* sel 0 -> 1 (DOWN row) */
       ui_handle_key(SDLK_RETURN);                  /* capture btn 1 */
       ui_handle_button(GBTN_RTRIGGER);             /* bind right trigger */
       ui_handle_key(SDLK_ESCAPE);                  /* back to SCR_CTRL (sel=2) */

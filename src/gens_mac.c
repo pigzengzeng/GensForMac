@@ -428,22 +428,45 @@ static void gamepads_enumerate(void)
     }
   }
 
-  /* turn PORT_DEV_AUTO into a concrete source now that we know the pads:
-     port mp binds to gamepad mp if it exists, else port 0 falls back to the
-     keyboard and the rest stay NONE (unused). Already-explicit choices are
-     left untouched, so manual configuration survives hot-plug re-scans. */
-  settings_resolve_auto();
+  /* Reconcile each port's SOURCE with the pads we just opened. Called on every
+     enumeration (startup + hot-plug) so connecting pads "just works". */
+  gamepad_reconcile();
 }
 
-/* Resolve every PORT_DEV_AUTO source (see settings.h). Called from
-   gamepads_enumerate() after the pad list is rebuilt, and once at startup. */
-void settings_resolve_auto(void)
+/* Reconcile each port's SOURCE against the currently-connected pads. Runs on
+   every (re)enumeration so plugging / unplugging pads updates the bindings
+   without manual setup:
+     - a concrete pad index still in range is LOCKED (explicit user choice);
+     - a concrete index that now points past npads (the pad was removed) is
+       released back to AUTO so the slot can grab a different pad;
+     - AUTO and NONE ports grab the first still-unclaimed pad in port order;
+       an AUTO port that finds no free pad stays AUTO (and for PORT 1 only,
+       sdl_input_update() treats that as "fall back to the keyboard");
+     - KEYBOARD is always left untouched (explicit user choice).
+   Because we fill NONE ports too, an rc saved from a run with fewer pads no
+   longer strands the extra ports as unused. */
+void gamepad_reconcile(void)
 {
+  /* 1) release bindings to pads that no longer exist */
+  for (int mp = 0; mp < NUM_PORTS; mp++)
+    if (settings.port_dev[mp] >= npads)
+      settings.port_dev[mp] = PORT_DEV_AUTO;
+
+  int claimed[8] = {0};
+  /* 2) lock explicit concrete pad choices */
+  for (int mp = 0; mp < NUM_PORTS; mp++)
+    if (settings.port_dev[mp] >= 0 && settings.port_dev[mp] < npads)
+      claimed[settings.port_dev[mp]] = 1;
+
+  /* 3) fill AUTO / NONE ports with the first unclaimed pad */
   for (int mp = 0; mp < NUM_PORTS; mp++) {
-    if (settings.port_dev[mp] != PORT_DEV_AUTO) continue;
-    if (mp < npads)            settings.port_dev[mp] = mp;          /* pad mp */
-    else if (mp == 0)          settings.port_dev[mp] = PORT_DEV_KEYBOARD;
-    else                       settings.port_dev[mp] = PORT_DEV_NONE;
+    int src = settings.port_dev[mp];
+    if (src != PORT_DEV_AUTO && src != PORT_DEV_NONE) continue;
+    int p = -1;
+    for (int j = 0; j < npads; j++)
+      if (!claimed[j]) { p = j; break; }
+    if (p >= 0) { settings.port_dev[mp] = p; claimed[p] = 1; }
+    /* else: AUTO stays AUTO; NONE stays NONE */
   }
 }
 
@@ -539,57 +562,45 @@ const char *gens_pad_label(int i)
 
 /* non-zero when the pad currently reports ANY pressed button / hat / big axis
    deflection -- lets the user see immediately whether SDL receives input.
-   The result is debounced (hysteresis) so a single-frame glitch -- cheap
-   hardware axis jitter, button bounce -- cannot flip the on-screen diagnostic
-   row, which otherwise flickers. Turning on needs DEB_ON consecutive true
-   frames; turning off needs DEB_OFF consecutive false frames. */
-#define PAD_DEB_ON  3
-#define PAD_DEB_OFF 5
+   For raw joysticks the axis test is relative to each axis' sampled resting
+   value (raw_idle[]) so an axis that idles away from centre cannot jam the
+   diagnostic on; a real full deflection still dwarfs the idle-relative
+   threshold. The diagnostic reflects the hardware state as-is (no debouncing),
+   so a physically stuck button simply shows as a steady "INPUT!" rather than
+   being masked. */
 int gens_pad_pressed(int i)
 {
   if (i < 0 || i >= npads) return 0;
   pad_t *pd = &pads[i];
-  int cur = 0;
-
   if (pd->gc) {
-    if (!cur) {
-      for (int b = 0; b < SDL_CONTROLLER_BUTTON_MAX; b++)
-        if (SDL_GameControllerGetButton(pd->gc, (SDL_GameControllerButton)b)) { cur = 1; break; }
-    }
-    if (!cur && abs(SDL_GameControllerGetAxis(pd->gc, SDL_CONTROLLER_AXIS_LEFTX)) > 16000) cur = 1;
-    if (!cur && abs(SDL_GameControllerGetAxis(pd->gc, SDL_CONTROLLER_AXIS_LEFTY)) > 16000) cur = 1;
-    if (!cur && SDL_GameControllerGetAxis(pd->gc, SDL_CONTROLLER_AXIS_TRIGGERLEFT)  > 8000) cur = 1;
-    if (!cur && SDL_GameControllerGetAxis(pd->gc, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 8000) cur = 1;
+    for (int b = 0; b < SDL_CONTROLLER_BUTTON_MAX; b++)
+      if (SDL_GameControllerGetButton(pd->gc, (SDL_GameControllerButton)b)) return 1;
+    if (abs(SDL_GameControllerGetAxis(pd->gc, SDL_CONTROLLER_AXIS_LEFTX)) > 16000) return 1;
+    if (abs(SDL_GameControllerGetAxis(pd->gc, SDL_CONTROLLER_AXIS_LEFTY)) > 16000) return 1;
+    if (SDL_GameControllerGetAxis(pd->gc, SDL_CONTROLLER_AXIS_TRIGGERLEFT)  > 8000) return 1;
+    if (SDL_GameControllerGetAxis(pd->gc, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 8000) return 1;
     /* also catch a d-pad that lives on the underlying joystick's hat
        (see pad_button_down) so pressing directions lights the diagnostic */
     SDL_Joystick *j = SDL_GameControllerGetJoystick(pd->gc);
-    if (!cur && j) {
+    if (j) {
       int nh = SDL_JoystickNumHats(j);
       for (int h = 0; h < nh; h++)
-        if (SDL_JoystickGetHat(j, h) != SDL_HAT_CENTERED) { cur = 1; break; }
+        if (SDL_JoystickGetHat(j, h) != SDL_HAT_CENTERED) return 1;
     }
   } else if (pd->joy) {
     int nb = SDL_JoystickNumButtons(pd->joy);
-    if (!cur) for (int b = 0; b < nb; b++)
-      if (SDL_JoystickGetButton(pd->joy, b)) { cur = 1; break; }
+    for (int b = 0; b < nb; b++)
+      if (SDL_JoystickGetButton(pd->joy, b)) return 1;
     int nh = SDL_JoystickNumHats(pd->joy);
-    if (!cur) for (int h = 0; h < nh; h++)
-      if (SDL_JoystickGetHat(pd->joy, h) != SDL_HAT_CENTERED) { cur = 1; break; }
-    /* Deflection relative to each axis' sampled resting value (raw_idle[]),
-       with a high threshold. Cheap raw joysticks (e.g. GreenAsia) have analog
-       sticks/axes that idle off-centre and jitter; comparing against idle[]
-       stops the common "rests away from centre" false-positive, and the high
-       threshold ignores the small wander while still catching a real full
-       deflection (a d-pad on a non-zero axis such as 2/3 reaches +/-32768). */
+    for (int h = 0; h < nh; h++)
+      if (SDL_JoystickGetHat(pd->joy, h) != SDL_HAT_CENTERED) return 1;
+    /* idle-relative axis test: an axis that rests away from centre can't jam
+       the diagnostic on, but a real full deflection still lights it up. */
     int na = SDL_JoystickNumAxes(pd->joy);
-    if (!cur) for (int a = 0; a < na && a < 8; a++)
-      if (abs(SDL_JoystickGetAxis(pd->joy, a) - pd->raw_idle[a]) > 28000) { cur = 1; break; }
+    for (int a = 0; a < na && a < 8; a++)
+      if (abs(SDL_JoystickGetAxis(pd->joy, a) - pd->raw_idle[a]) > 16000) return 1;
   }
-
-  static int st[8];   /* hysteresis counter per pad */
-  if (cur) { if (st[i] <  PAD_DEB_ON)  st[i]++; }
-  else     { if (st[i] > -PAD_DEB_OFF) st[i]--; }
-  return st[i] > 0;
+  return 0;
 }
 
 /* best-effort mapping from a Game Controller button enum to a raw joystick
@@ -745,7 +756,8 @@ int sdl_input_update(void)
     int core = port_to_pad[mp];
     int src  = settings.port_dev[mp];
 
-    if (src == PORT_DEV_KEYBOARD) {
+    if (src == PORT_DEV_KEYBOARD || (src == PORT_DEV_AUTO && mp == 0)) {
+      /* a still-unbound PORT 1 (no pads at all) falls back to the keyboard */
       for (int b = 0; b < 12; b++) {
         SDL_Scancode sc = settings.keymap[mp][b];
         if (sc != SDL_SCANCODE_UNKNOWN && k[sc])
@@ -994,6 +1006,7 @@ int main(int argc, char **argv)
         case SDL_JOYDEVICEADDED:        /* raw joysticks (non-GC pads) hot-plug */
         case SDL_JOYDEVICEREMOVED:
           gamepads_enumerate();   /* re-scan pads on hot-plug */
+          mac_menu_sync_gamepads(); /* refresh the "N connected" readout */
           break;
         case SDL_KEYDOWN: {
           SDL_Keycode key = ev.key.keysym.sym;

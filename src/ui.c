@@ -75,8 +75,11 @@ void ui_handle_key(SDL_Keycode key)
   switch (screen) {
     case SCR_CTRL:
       if (key == SDLK_ESCAPE) { ui_close(); break; }
-      if (key == SDLK_UP)        sel = (sel + 8) % 9;     /* 8 ports + DONE */
-      else if (key == SDLK_DOWN) sel = (sel + 1) % 9;
+      /* 8 ports + MULTITAP + DONE = 10 selectable rows.
+         UP must step back one: (sel - 1 + 10) % 10 == (sel + 9) % 10.
+         Using (sel + 10) % 10 would equal sel and freeze the cursor. */
+      if (key == SDLK_UP)        sel = (sel + 9) % 10;
+      else if (key == SDLK_DOWN) sel = (sel + 1) % 10;
       else if (key == SDLK_LEFT || key == SDLK_RIGHT) {
         if (sel < 8) {
           int d = (key == SDLK_RIGHT) ? 1 : -1;
@@ -86,11 +89,19 @@ void ui_handle_key(SDL_Keycode key)
           settings.port_dev[sel] = src_option_to_dev(idx);
           settings_apply();   /* re-derive USED/UNUSED + push to core */
           settings_save();
+        } else if (sel == 8) {   /* MULTITAP row: cycle the mode */
+          int d = (key == SDLK_RIGHT) ? 1 : -1;
+          settings.multitap = (settings.multitap + d + 3) % 3;
+          settings_apply();   /* re-map port_to_pad + force SYSTEM_TEAMPLAYER */
+          settings_save();
         }
       }
       else if (key == SDLK_RETURN || key == SDLK_SPACE) {
-        if (sel == 8) { ui_close(); }              /* DONE */
-        else { redef_port = sel; screen = SCR_REDEF; sel = 0; capture_btn = -1; }
+        if (sel == 9) { ui_close(); }              /* DONE */
+        else if (sel < 8) {
+          redef_port = sel; screen = SCR_REDEF; sel = 0; capture_btn = -1;
+        }
+        /* sel == 8 (MULTITAP) is toggled with LEFT/RIGHT; ENTER is a no-op */
       }
       break;
 
@@ -172,7 +183,7 @@ void ui_render(SDL_Renderer *r)
   if (screen == SCR_CTRL) {
     put(r, cx - font_width("CONTROL PAD SETUP", scale)/2, 30,
         "CONTROL PAD SETUP", scale, title);
-    int y = 96;
+    int y = 72;
     for (int i = 0; i < 8; i++) {
       char lbl[48];
       snprintf(lbl, sizeof(lbl), "PORT %d", i + 1);
@@ -186,14 +197,26 @@ void ui_render(SDL_Renderer *r)
       int maxw = rx - (lx + 200);   /* keep clear of the PORT label */
       if (maxw < 40) maxw = 40;
       put_right_clip(r, rx, y, sn, scale, (i == sel) ? hi : scol, maxw);
-      y += 32;
+      y += 26;
     }
-    put(r, lx, y, "DONE", scale, 8 == sel ? hi : norm);
-    put(r, lx, y + 34, "LEFT/RIGHT: SOURCE   ENTER: KEYS   ESC: DONE", 1, dim);
+    /* MULTITAP row: Off (2-player) / Team Player on console port 1 / port 2.
+       Forces the Sega Team Player so 4-player versus games (no player-count
+       menu) auto-join 1P..4P by pressing each pad's START. */
+    put(r, lx, y, "MULTITAP", scale, (8 == sel) ? hi : norm);
+    {
+      const char *mn = multitap_name(settings.multitap);
+      SDL_Color mcol = (settings.multitap == MULTITAP_OFF) ? dim : pad;
+      int maxw = rx - (lx + 200);
+      if (maxw < 40) maxw = 40;
+      put_right_clip(r, rx, y, mn, scale, (8 == sel) ? hi : mcol, maxw);
+    }
+    y += 26;
+    put(r, lx, y, "DONE", scale, 9 == sel ? hi : norm);
+    put(r, lx, y + 24, "LEFT/RIGHT: CHANGE   ENTER: KEYS   ESC: DONE", 1, dim);
 
     /* ---- live gamepad diagnostics: which port(s) does each pad drive? ---- */
     {
-      int dy = y + 58;
+      int dy = y + 34;
       int n = gens_pad_count();
       char buf[160];
       if (n == 0) {
@@ -203,7 +226,7 @@ void ui_render(SDL_Renderer *r)
         snprintf(buf, sizeof(buf), "GAMEPADS: %d DETECTED", n);
         put(r, lx, dy, buf, 1, pad);
         for (int i = 0; i < n; i++) {
-          dy += 18;
+          dy += 16;
           /* collect the ports that source this pad */
           char ports[64] = "";
           int cnt = 0;

@@ -41,14 +41,31 @@
 #define CT_NONE     0
 #define CT_6BUTTON  2
 
+/* Multitap mode. A plain 2-player layout (1P on console port 1, 2P on console
+   port 2) and a 4-player Team-Player layout (1P..4P on ONE console port's four
+   sub-slots) are mutually exclusive, so the user must pick the mode that matches
+   the game -- exactly like Kega Fusion / Genesis Plus GX. Off = normal 2-player
+   (plus auto Team-Player when >1 pad shares a console port, for count-select
+   games); MULTITAP_TP1 / MULTITAP_TP2 force the Sega Team Player on console port
+   1 / 2 and remap PORT1..PORT4 onto that port's four sub-slots so PORT1=1P ..
+   PORT4=4P (and the game can auto-join by START). */
+#define MULTITAP_OFF   0
+#define MULTITAP_TP1  1   /* Team Player on console port 1 -> pads 0..3 = 1P..4P */
+#define MULTITAP_TP2  2   /* Team Player on console port 2 -> pads 4..7 = 1P..4P */
+
 /* Per-port input SOURCE. Each on-screen port is driven by exactly one source:
      PORT_DEV_KEYBOARD (-1) -> the keyboard (its own per-port keymap)
      PORT_DEV_NONE     (-2) -> nothing (port is unused)
-     PORT_DEV_AUTO     (-3) -> resolved once at startup / on hot-plug into the
-                               next free gamepad, else keyboard (port 0) / none
+     PORT_DEV_AUTO     (-3) -> auto: grabs the first still-unclaimed connected
+                               gamepad on every (re)enumeration; if no pad is
+                               free it stays AUTO, and for PORT 1 only this means
+                               "fall back to the keyboard" at runtime.
      0 .. n-1               -> that specific connected gamepad (pads[] index)
    Because two ports can pick the SAME gamepad, "one pad controls two players"
-   (一控二) falls out for free: both ports read the same physical device. */
+   (一控二) falls out for free: both ports read the same physical device.
+   gamepad_reconcile() runs on every enumeration (startup + hot-plug) and fills
+   AUTO / NONE ports with any unclaimed pad, so plugging in pads "just works"
+   without manual setup. */
 #define PORT_DEV_KEYBOARD (-1)
 #define PORT_DEV_NONE     (-2)
 #define PORT_DEV_AUTO     (-3)
@@ -73,6 +90,7 @@ typedef struct {
   int contrast;      /* -100 .. +100 */
 
   /* controllers */
+  int multitap;      /* MULTITAP_* : Off / Team Player on console port 1/2 */
   int port_dev[NUM_PORTS];       /* source per port: KEYBOARD / pad idx / NONE */
   int port_type[NUM_PORTS];      /* CT_* */
   SDL_Scancode keymap[NUM_PORTS][NUM_BUTTONS];          /* keyboard binding */
@@ -81,24 +99,25 @@ typedef struct {
 
 extern t_settings settings;
 
-/* Menu port (0..7, i.e. PORT 1..8) -> core input.pad[] index.
-   The Genesis has two physical ports: port 0 reads input.pad[0] (player 1)
-   and port 1 reads input.pad[4] (player 2). Slots 1-3 / 5-7 are only read by
-   games that support the 4-Way Play / Team Player adapter, so a plain 2-player
-   game only ever uses input.pad[0] and input.pad[4]. This table keeps the menu
-   layout physically correct: PORT 1 = player 1 (pad 0), PORT 2 = player 2
-   (pad 4), the rest are Team Player sub-slots. */
-extern const int port_to_pad[8];
+/* Menu port (0..7, i.e. PORT 1..8) -> core input.pad[] index. This table is
+   REWRITTEN by settings_apply() according to the current multitap mode (see
+   settings.c): in Off mode PORT 1 = pad 0 (player 1) and PORT 2 = pad 4 (player
+   2) so a plain 2-player game is correct; in Team Player mode PORT 1..4 are
+   collapsed onto the four sub-slots of ONE console port (pads 0..3 or 4..7) so
+   the four players line up with the on-screen ports 1..4. Declared non-const so
+   settings_apply() may mutate it. */
+extern int port_to_pad[8];
 
 void settings_init_defaults(void);
 void settings_load(void);     /* from ~/.gensmacrc, falls back to defaults */
 void settings_save(void);     /* to ~/.gensmacrc */
 void settings_apply(void);    /* push port types into the core's input map */
 void settings_reset_port(int port); /* restore one port to factory defaults */
-void settings_resolve_auto(void); /* turn PORT_DEV_AUTO into a concrete source */
+void gamepad_reconcile(void); /* fill AUTO/NONE ports with connected pads */
 
 const char *button_name(int b);
 const char *gpad_button_name(SDL_GameControllerButton b);
+const char *multitap_name(int m);
 const char *port_type_name(int t);
 const char *render_mode_name(int m);
 const char *scanline_name(int s);

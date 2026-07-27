@@ -11,9 +11,12 @@
 
 t_settings settings;
 
-/* see settings.h for the rationale; this is the single source of truth that
-   maps the on-screen 8-port menu onto the core's two physical ports. */
-const int port_to_pad[8] = { 0, 4, 1, 2, 3, 5, 6, 7 };
+/* Menu port -> core input.pad[] slot. Recomputed by settings_apply() for the
+   active multitap mode (Off keeps the classic 2-player split; Team Player mode
+   collapses PORT 1..4 onto one console port's four sub-slots). Declared here as
+   a mutable global so settings_apply() can rewrite it; sdl_input_update() and
+   the core read it every frame. */
+int port_to_pad[8] = { 0, 4, 1, 2, 3, 5, 6, 7 };
 
 const char *button_name(int b)
 {
@@ -53,6 +56,16 @@ const char *port_type_name(int t)
     case CT_NONE:     return "NONE";
     case CT_6BUTTON:  return "6-BUTTON";
     default:          return "?";
+  }
+}
+
+const char *multitap_name(int m)
+{
+  switch (m) {
+    case MULTITAP_OFF:  return "OFF";
+    case MULTITAP_TP1:  return "TEAM PLAYER (PORT 1)";
+    case MULTITAP_TP2:  return "TEAM PLAYER (PORT 2)";
+    default:            return "?";
   }
 }
 
@@ -126,11 +139,12 @@ void settings_init_defaults(void)
   settings.greyscale   = 0;
   settings.brightness  = 0;
   settings.contrast    = 0;
+  settings.multitap    = MULTITAP_OFF;
 
   for (int p = 0; p < NUM_PORTS; p++) {
-    /* AUTO is resolved into a concrete source (keyboard / a specific gamepad /
-       none) by settings_resolve_auto() after pads are enumerated, so a freshly
-       plugged controller "just works" as player 1 without manual setup. */
+    /* AUTO grabs the first unclaimed connected pad on every (re)enumeration
+       (see gamepad_reconcile()), so a freshly plugged controller "just works"
+       without manual setup. */
     settings.port_dev[p]  = PORT_DEV_AUTO;
     /* Every wired port is a 6-button pad (compatible with 3-button games too),
        so the type is fixed; settings_apply() derives USED vs UNUSED from the
@@ -188,6 +202,7 @@ void settings_load(void)
     else if (!strcmp(key, "greyscale"))    settings.greyscale = val;
     else if (!strcmp(key, "brightness"))   settings.brightness = val;
     else if (!strcmp(key, "contrast"))     settings.contrast = val;
+    else if (!strcmp(key, "multitap"))     settings.multitap = val;
     else if (!strcmp(key, "keyboard_port"))settings.port_dev[0] = PORT_DEV_KEYBOARD; /* legacy rc */
     else if (!strncmp(key, "port_dev", 8)) {
       int p = atoi(key + 8);
@@ -243,6 +258,7 @@ void settings_save(void)
   fprintf(f, "greyscale=%d\n",    settings.greyscale);
   fprintf(f, "brightness=%d\n",   settings.brightness);
   fprintf(f, "contrast=%d\n",     settings.contrast);
+  fprintf(f, "multitap=%d\n",     settings.multitap);
   for (int p = 0; p < NUM_PORTS; p++)
     fprintf(f, "port_dev%d=%d\n", p, settings.port_dev[p]);
   for (int p = 0; p < NUM_PORTS; p++)
@@ -265,28 +281,58 @@ void settings_apply(void)
 {
   const uint8 auto_mask = DEVICE_PAD2B | DEVICE_PAD3B | DEVICE_PAD6B;
 
-  /* mark which core pad slots are actually in use (non-NONE menu port) */
+  /* 1) Rewrite the menu-port -> core-pad mapping for the active multitap mode.
+       Off          : PORT1=pad0, PORT2=pad4 -> plain 2-player (each on its own
+                      console port); the rest stay on their console port.
+       Team Player 1: PORT1..4 -> pads 0..3, i.e. the four sub-slots of console
+                      port 1, so PORT1=1P .. PORT4=4P on that one tap.
+       Team Player 2: PORT1..4 -> pads 4..7, the four sub-slots of console port
+                      2 (the layout most 4-player MD games expect). */
+  static const int map_off[8] = { 0, 4, 1, 2, 3, 5, 6, 7 };
+  static const int map_tp1[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+  static const int map_tp2[8] = { 4, 5, 6, 7, 0, 1, 2, 3 };
+  const int *base = map_off;
+  if (settings.multitap == MULTITAP_TP1)      base = map_tp1;
+  else if (settings.multitap == MULTITAP_TP2) base = map_tp2;
+  for (int mp = 0; mp < NUM_PORTS; mp++) port_to_pad[mp] = base[mp];
+
+  /* 2) Mark which core pad slots are actually in use and tag every slot as a
+       6-button pad. We set ALL eight slots to DEVICE_PAD6B (not just the used
+       ones): the core's Team-Player reader pulls config.input[player].padtype
+       by PLAYER counter, which for port 2 is config.input[1..4] -- a different
+       index than the core pad slot -- so leaving the unused slots at their
+       default would starve the tap's later sub-slots. 6B is backward-compatible
+       with 3-button games, so this is harmless for every connected device. */
   int used[8] = {0};
   for (int mp = 0; mp < NUM_PORTS; mp++) {
     int pad = port_to_pad[mp];
-    /* A wired port is always a 6-button pad (backward-compatible with 3-button
-       games); the only state that matters is USED (any source but NONE) vs
-       UNUSED (NONE). Derived from the source so there is no separate setting. */
     int t = (settings.port_dev[mp] == PORT_DEV_NONE) ? CT_NONE : CT_6BUTTON;
     settings.port_type[mp] = t;
     if (t != CT_NONE) used[pad] = 1;
-    config.input[pad].padtype = (t == CT_NONE) ? auto_mask : DEVICE_PAD6B;
+    config.input[pad].padtype = DEVICE_PAD6B;
   }
+  (void)auto_mask;
 
-  /* enable each physical console port if any of its four pad slots is used.
-     A port is TEAMPLAYER only when more than one device sits on it (so 4-Way
-     Play-aware games can read the extra sub-slots); otherwise plain GAMEPAD.
-     Both ports are kept enabled even when idle so a late-plugged pad still
-     registers on the expected slot instead of being silently ignored. */
-  for (int cp = 0; cp < 2; cp++) {
-    int n = 0;
-    for (int i = 0; i < 4; i++) n += used[cp * 4 + i];
-    input.system[cp] = n ? (n > 1 ? SYSTEM_TEAMPLAYER : SYSTEM_GAMEPAD) : SYSTEM_GAMEPAD;
+  /* 3) Configure the two console ports. In an explicit Team Player mode the
+       chosen port is forced to SYSTEM_TEAMPLAYER (the game then reads 1P..4P
+       from its four sub-slots); the other port stays a plain GAMEPAD so a pad
+       bound to PORT5..8 still drives a separate player there. In Off mode we
+       keep the old auto rule: a console port becomes TEAMPLAYER only when more
+       than one device sits on it (so count-select games keep working), else
+       plain GAMEPAD. */
+  if (settings.multitap == MULTITAP_TP1) {
+    input.system[0] = SYSTEM_TEAMPLAYER;
+    input.system[1] = SYSTEM_GAMEPAD;
+  } else if (settings.multitap == MULTITAP_TP2) {
+    input.system[0] = SYSTEM_GAMEPAD;
+    input.system[1] = SYSTEM_TEAMPLAYER;
+  } else {
+    for (int cp = 0; cp < 2; cp++) {
+      int n = 0;
+      for (int i = 0; i < 4; i++) n += used[cp * 4 + i];
+      input.system[cp] = n ? (n > 1 ? SYSTEM_TEAMPLAYER : SYSTEM_GAMEPAD)
+                            : SYSTEM_GAMEPAD;
+    }
   }
 
   /* if a ROM is already running, re-apply the mapping immediately */

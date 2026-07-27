@@ -24,6 +24,10 @@ void mac_action_toggle_fullscreen(void);
 void mac_action_toggle_turbo(void);
 void mac_action_quit(void);
 
+/* Refresh the menu's "N connected" gamepad readout (call after a hot-plug
+   re-scan so the count stays current). Implemented in cocoa_menu.m. */
+void mac_menu_sync_gamepads(void);
+
 #ifdef __cplusplus
 }
 #endif

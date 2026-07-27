@@ -19,6 +19,9 @@
 #include "settings.h"
 #include "cocoa_menu.h"
 
+/* gens_mac.c */
+extern int gens_pad_count(void);
+
 /* ----- handler that owns every menu action ------------------------------- */
 @interface MenuHandler : NSObject
 @property (nonatomic, strong) NSMenuItem *stretchItem, *vsyncItem, *greyscaleItem;
@@ -30,6 +33,10 @@
 @end
 
 static MenuHandler *g_handler = nil;
+
+/* Called by gens_mac.c on gamepad hot-plug so the "N connected" readout stays
+   current without the user reopening the menu. */
+void mac_menu_sync_gamepads(void) { [g_handler sync]; }
 
 @implementation MenuHandler
 
@@ -89,9 +96,9 @@ static MenuHandler *g_handler = nil;
   [_brightnessItem setTitle:[NSString stringWithFormat:@"Brightness: %+d%%", settings.brightness]];
   [_contrastItem   setTitle:[NSString stringWithFormat:@"Contrast: %+d%%", settings.contrast]];
 
-  int n = SDL_NumJoysticks();
-  int pads = 0;
-  for (int j = 0; j < n; j++) if (SDL_IsGameController(j)) pads++;
+  int pads = gens_pad_count();   /* counts every opened pad (Game Controller
+                                     AND raw joystick), unlike SDL_IsGameController
+                                     which skips raw joysticks like GreenAsia */
   NSString *info = [NSString stringWithFormat:@"Gamepads: %d connected", pads];
   for (NSMenuItem *it in _gamepadInfoItem) [it setTitle:info];
 }

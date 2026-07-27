@@ -331,6 +331,9 @@ typedef struct {
   SDL_GameController *gc;   /* non-NULL when opened as a Game Controller */
   SDL_Joystick       *joy;  /* non-NULL when opened as a raw joystick */
   char label[64];           /* "GC name" / "JOY name" for on-screen diagnostics */
+  Sint16 raw_idle[8];      /* sampled resting value of each raw axis, used to
+                              skip axes that rest away from centre (so a d-pad
+                              mapped to such an axis can't jam a direction on) */
 } pad_t;
 static pad_t pads[8];
 static int  npads = 0;
@@ -405,6 +408,16 @@ static void gamepads_enumerate(void)
         pads[npads].gc = NULL; pads[npads].joy = joy;
         const char *nm = SDL_JoystickName(joy);
         snprintf(pads[npads].label, sizeof(pads[npads].label), "JOY %s", nm ? nm : "?");
+        /* sample each axis' resting value so the d-pad reader can skip axes
+           that rest away from centre (a digital axis that idles at an extreme
+           would otherwise jam a direction on permanently). */
+        SDL_JoystickUpdate();
+        int na = SDL_JoystickNumAxes(joy);
+        for (int a = 0; a < na && a < 8; a++) {
+          Sint16 s = 0;
+          for (int t = 0; t < 3; t++) s += SDL_JoystickGetAxis(joy, a);
+          pads[npads].raw_idle[a] = (Sint16)(s / 3);
+        }
         fprintf(stderr, "[pads] #%d opened as raw Joystick: %s (buttons=%d hats=%d axes=%d)\n",
                 npads, nm ? nm : "?", SDL_JoystickNumButtons(joy),
                 SDL_JoystickNumHats(joy), SDL_JoystickNumAxes(joy));
@@ -424,6 +437,19 @@ static pad_t *raw_pad_from_instance(SDL_JoystickID id)
   for (int i = 0; i < npads; i++) {
     if (pads[i].joy && !pads[i].gc &&
         SDL_JoystickInstanceID(pads[i].joy) == id)
+      return &pads[i];
+  }
+  return NULL;
+}
+
+/* counterpart of raw_pad_from_instance(): find the pad whose Game Controller
+   owns the joystick with the given instance id, so a Game Controller whose
+   d-pad is reported on a hat still feeds the d-pad bind in the UI. */
+static pad_t *gc_pad_from_instance(SDL_JoystickID id)
+{
+  for (int i = 0; i < npads; i++) {
+    if (pads[i].gc &&
+        SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pads[i].gc)) == id)
       return &pads[i];
   }
   return NULL;
@@ -451,6 +477,38 @@ static SDL_GameControllerButton joy_index_to_button(int bi)
     case 15: return SDL_CONTROLLER_BUTTON_DPAD_RIGHT;
     default: return SDL_CONTROLLER_BUTTON_INVALID;
   }
+}
+
+/* d-pad / trigger deflection thresholds, shared by in-game reading and the
+   settings capture. Defined here (above pad_button_down) so the helpers that
+   use it compile. */
+#define AXIS_ON 16000
+#define TRIG_ON 8000   /* trigger axes rest at 0, full pull = 32767 */
+
+/* Many cheap pads that SDL opens as a RAW joystick (e.g. GreenAsia USB
+   Joystick) report their d-pad on a pair of analog axes (often axes 2/3, not
+   the left-stick axes 0/1). Read every axis whose resting value is near centre
+   and treat a large deflection as a d-pad direction. Axes that idle away from
+   centre (digital axes that rest at an extreme, or trigger axes) are skipped so
+   they can't jam a direction on. Even axis index => horizontal (LEFT/RIGHT),
+   odd index => vertical (UP/DOWN); sign gives the direction. */
+static int raw_dpad_axis(const pad_t *pd, SDL_GameControllerButton gb)
+{
+  int na = SDL_JoystickNumAxes(pd->joy);
+  for (int a = 0; a < na && a < 8; a++) {
+    if (abs(pd->raw_idle[a]) > 8000) continue;       /* skip off-centre axes */
+    Sint16 v = SDL_JoystickGetAxis(pd->joy, a);
+    if (abs(v) <= AXIS_ON) continue;
+    int horiz = (a % 2 == 0);
+    if (horiz) {
+      if (v < 0 && gb == SDL_CONTROLLER_BUTTON_DPAD_LEFT)  return 1;
+      if (v > 0 && gb == SDL_CONTROLLER_BUTTON_DPAD_RIGHT) return 1;
+    } else {
+      if (v < 0 && gb == SDL_CONTROLLER_BUTTON_DPAD_UP)    return 1;
+      if (v > 0 && gb == SDL_CONTROLLER_BUTTON_DPAD_DOWN)  return 1;
+    }
+  }
+  return 0;
 }
 
 /* ---- on-screen diagnostics used by ui.c (SCR_CTRL footer) --------------- */
@@ -524,8 +582,6 @@ static int joy_button_index(SDL_GameControllerButton gb)
    For the four dpad directions the LEFT ANALOG STICK is also honoured (axis
    0/1, ~50% deflection) -- many pads map their primary stick there and users
    expect it to steer the game just like the dpad. */
-#define AXIS_ON 16000
-#define TRIG_ON 8000   /* trigger axes rest at 0, full pull = 32767 */
 static int pad_button_down(const pad_t *pd, SDL_GameControllerButton gb)
 {
   /* LT / RT are ANALOG AXES in SDL, not buttons; they are stored in gpadmap
@@ -557,8 +613,12 @@ static int pad_button_down(const pad_t *pd, SDL_GameControllerButton gb)
         int lx = SDL_GameControllerGetAxis(pd->gc, SDL_CONTROLLER_AXIS_LEFTX);
         int ly = SDL_GameControllerGetAxis(pd->gc, SDL_CONTROLLER_AXIS_LEFTY);
         SDL_Joystick *j = SDL_GameControllerGetJoystick(pd->gc);
-        Uint8 hat = (j && SDL_JoystickNumHats(j) > 0)
-                      ? SDL_JoystickGetHat(j, 0) : SDL_HAT_CENTERED;
+        Uint8 hat = SDL_HAT_CENTERED;
+        if (j) {
+          int nh = SDL_JoystickNumHats(j);
+          for (int h = 0; h < nh; h++)
+            hat |= SDL_JoystickGetHat(j, h);
+        }
         /* HJC/BETOP C3 (and many cheap pads) report the d-pad on the FIRST TWO
            RAW axes (the left-stick axes), not as DPAD buttons or a hat -- so
            read those underlying raw axes directly too. This is belt-and-
@@ -593,16 +653,20 @@ static int pad_button_down(const pad_t *pd, SDL_GameControllerButton gb)
       switch (gb) {
         case SDL_CONTROLLER_BUTTON_DPAD_UP:
           return (h & SDL_HAT_UP)    || SDL_JoystickGetButton(pd->joy, 12) ||
-                 SDL_JoystickGetAxis(pd->joy, 1) < -AXIS_ON;
+                 SDL_JoystickGetAxis(pd->joy, 1) < -AXIS_ON ||
+                 raw_dpad_axis(pd, gb);
         case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
           return (h & SDL_HAT_DOWN)  || SDL_JoystickGetButton(pd->joy, 13) ||
-                 SDL_JoystickGetAxis(pd->joy, 1) >  AXIS_ON;
+                 SDL_JoystickGetAxis(pd->joy, 1) >  AXIS_ON ||
+                 raw_dpad_axis(pd, gb);
         case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
           return (h & SDL_HAT_LEFT)  || SDL_JoystickGetButton(pd->joy, 14) ||
-                 SDL_JoystickGetAxis(pd->joy, 0) < -AXIS_ON;
+                 SDL_JoystickGetAxis(pd->joy, 0) < -AXIS_ON ||
+                 raw_dpad_axis(pd, gb);
         case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
           return (h & SDL_HAT_RIGHT) || SDL_JoystickGetButton(pd->joy, 15) ||
-                 SDL_JoystickGetAxis(pd->joy, 0) >  AXIS_ON;
+                 SDL_JoystickGetAxis(pd->joy, 0) >  AXIS_ON ||
+                 raw_dpad_axis(pd, gb);
         default: break;
       }
     }
@@ -912,15 +976,28 @@ int main(int argc, char **argv)
           if (ui_is_open()) ui_handle_button(ev.cbutton.button);
           break;
         case SDL_CONTROLLERAXISMOTION:
-          /* triggers are axes, not buttons: pulling LT/RT past the threshold
-             while the UI is capturing binds the corresponding pseudo button.
-             ui_handle_button() is a no-op outside capture, and capture ends
-             after the first bind, so repeated motion events are harmless. */
-          if (ui_is_open() && ev.caxis.value > TRIG_ON) {
-            if (ev.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT)
-              ui_handle_button(GBTN_LTRIGGER);
-            else if (ev.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT)
-              ui_handle_button(GBTN_RTRIGGER);
+          if (ui_is_open()) {
+            SDL_GameControllerButton db = SDL_CONTROLLER_BUTTON_INVALID;
+            /* triggers are axes, not buttons: pulling LT/RT past the threshold
+               while capturing binds the corresponding pseudo button.
+               ui_handle_button() is a no-op outside capture, and capture ends
+               after the first bind, so repeated motion events are harmless. */
+            if (ev.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT && ev.caxis.value > TRIG_ON)
+              db = GBTN_LTRIGGER;
+            else if (ev.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT && ev.caxis.value > TRIG_ON)
+              db = GBTN_RTRIGGER;
+            /* Many cheap pads (BETOP C3, etc.) report the d-pad on the LEFT
+               STICK axes (0/1), not as DPAD buttons or a hat. Deflection past
+               the d-pad threshold while capturing binds the matching direction
+               so the d-pad is remappable too. */
+            else if (ev.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX) {
+              if (ev.caxis.value < -AXIS_ON)      db = SDL_CONTROLLER_BUTTON_DPAD_LEFT;
+              else if (ev.caxis.value >  AXIS_ON) db = SDL_CONTROLLER_BUTTON_DPAD_RIGHT;
+            } else if (ev.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) {
+              if (ev.caxis.value < -AXIS_ON)      db = SDL_CONTROLLER_BUTTON_DPAD_UP;
+              else if (ev.caxis.value >  AXIS_ON) db = SDL_CONTROLLER_BUTTON_DPAD_DOWN;
+            }
+            if (db != SDL_CONTROLLER_BUTTON_INVALID) ui_handle_button(db);
           }
           break;
         case SDL_JOYBUTTONDOWN:
@@ -933,12 +1010,40 @@ int main(int argc, char **argv)
           }
           break;
         case SDL_JOYHATMOTION:
-          /* raw-joystick dpad capture in the UI */
-          if (ui_is_open() && raw_pad_from_instance(ev.jhat.which)) {
-            if (ev.jhat.value & SDL_HAT_UP)    ui_handle_button(SDL_CONTROLLER_BUTTON_DPAD_UP);
-            else if (ev.jhat.value & SDL_HAT_DOWN)  ui_handle_button(SDL_CONTROLLER_BUTTON_DPAD_DOWN);
-            else if (ev.jhat.value & SDL_HAT_LEFT)  ui_handle_button(SDL_CONTROLLER_BUTTON_DPAD_LEFT);
-            else if (ev.jhat.value & SDL_HAT_RIGHT) ui_handle_button(SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
+          /* d-pad capture in the UI. Covers both raw-joystick pads and Game
+             Controllers whose d-pad is reported on a hat. */
+          if (ui_is_open()) {
+            pad_t *pd = raw_pad_from_instance(ev.jhat.which);
+            if (!pd) pd = gc_pad_from_instance(ev.jhat.which);
+            if (pd) {
+              Uint8 v = ev.jhat.value;
+              if (v & SDL_HAT_UP)         ui_handle_button(SDL_CONTROLLER_BUTTON_DPAD_UP);
+              else if (v & SDL_HAT_DOWN)  ui_handle_button(SDL_CONTROLLER_BUTTON_DPAD_DOWN);
+              else if (v & SDL_HAT_LEFT)  ui_handle_button(SDL_CONTROLLER_BUTTON_DPAD_LEFT);
+              else if (v & SDL_HAT_RIGHT) ui_handle_button(SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
+            }
+          }
+          break;
+        case SDL_JOYAXISMOTION:
+          /* raw-joystick d-pad capture: cheap pads (e.g. GreenAsia USB
+             Joystick) report the d-pad on a pair of analog axes, not as
+             buttons/hat. Bind the matching direction when an on-centre axis
+             deflects past threshold. Off-centre-idle axes are skipped so a
+             resting-extreme axis can't jam a bind. */
+          if (ui_is_open()) {
+            pad_t *pd = raw_pad_from_instance(ev.jaxis.which);
+            if (pd && ev.jaxis.axis >= 0 && ev.jaxis.axis < 8 &&
+                abs(pd->raw_idle[ev.jaxis.axis]) <= 8000 &&
+                abs(ev.jaxis.value) > AXIS_ON) {
+              int horiz = (ev.jaxis.axis % 2 == 0);
+              if (horiz) {
+                if (ev.jaxis.value < 0) ui_handle_button(SDL_CONTROLLER_BUTTON_DPAD_LEFT);
+                else                     ui_handle_button(SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
+              } else {
+                if (ev.jaxis.value < 0) ui_handle_button(SDL_CONTROLLER_BUTTON_DPAD_UP);
+                else                     ui_handle_button(SDL_CONTROLLER_BUTTON_DPAD_DOWN);
+              }
+            }
           }
           break;
         default: break;

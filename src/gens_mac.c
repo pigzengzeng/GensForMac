@@ -565,9 +565,15 @@ int gens_pad_pressed(int i)
     int nh = SDL_JoystickNumHats(pd->joy);
     for (int h = 0; h < nh; h++)
       if (SDL_JoystickGetHat(pd->joy, h) != SDL_HAT_CENTERED) return 1;
+    /* Detect deflection relative to each axis' sampled resting value, not a
+       fixed absolute threshold. Cheap raw joysticks (e.g. GreenAsia) have
+       analog sticks/axes that idle away from centre and jitter; the old
+       abs(axis) > 16000 test flagged them every frame, so the on-screen
+       diagnostic row flickered. Comparing against raw_idle[] also lets the
+       diagnostic light up for a d-pad that lives on a non-zero axis (e.g. 2/3). */
     int na = SDL_JoystickNumAxes(pd->joy);
-    for (int a = 0; a < na && a < 2; a++)
-      if (abs(SDL_JoystickGetAxis(pd->joy, a)) > 16000) return 1;
+    for (int a = 0; a < na && a < 8; a++)
+      if (abs(SDL_JoystickGetAxis(pd->joy, a) - pd->raw_idle[a]) > 16000) return 1;
   }
   return 0;
 }

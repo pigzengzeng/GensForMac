@@ -244,33 +244,46 @@ void ui_render(SDL_Renderer *r)
              dev_label(settings.port_dev[redef_port]));
     put(r, cx - font_width(hdr, scale)/2, 28, hdr, scale, title);
 
-    /* column headers */
-    int kx = cx - 150;        /* KEY column */
-    int px = cx + 40;         /* PAD column */
-    put(r, kx, 56, "KEY", 1, kbd);
-    put(r, px, 56, "PAD", 1, pad);
+    int dev = settings.port_dev[redef_port];
+    int is_kbd = (dev == PORT_DEV_KEYBOARD);
+    int is_pad = (dev >= 0 && dev < gens_pad_count());
+    /* A port with a real source owns exactly ONE binding column: keyboard
+       ports show the KEY column, pad ports show the PAD column. They never
+       coexist (the old UI drew both even for a keyboard-only port). */
 
     int y = 74;
-    for (int b = 0; b < 12; b++) {
-      int row = b;            /* row index in SEL space (0..11) */
-      const char *kn = SDL_GetScancodeName(settings.keymap[redef_port][b]);
-      if (!kn || kn[0] == 0) kn = "-";
-      const char *pn = gpad_button_name(settings.gpadmap[redef_port][b]);
-      char rowlbl[24];
-      snprintf(rowlbl, sizeof(rowlbl), "%s%s", (row == sel) ? "> " : "  ",
-               button_name(b));
-      put(r, lx, y, rowlbl, scale, (row == sel) ? hi : norm);
-      put(r, kx, y, kn, scale, (row == sel) ? kbd : norm);
-      put(r, px, y, pn, scale, (row == sel) ? pad : norm);
-      y += 24;
+    if (!is_kbd && !is_pad) {
+      /* unassigned (NONE) port: nothing meaningful to bind here */
+      put(r, lx, y, "THIS PORT HAS NO DEVICE ASSIGNED", 1, dim);
+      put(r, lx, y + 24, "SET A SOURCE IN CONTROL PAD SETUP FIRST", 1, dim);
+      y += 70;
+    } else {
+      int col_x = cx + 30;     /* the single visible binding column */
+      put(r, col_x, 56, is_kbd ? "KEY" : "PAD", 1, is_kbd ? kbd : pad);
+      for (int b = 0; b < 12; b++) {
+        int row = b;           /* row index in SEL space (0..11) */
+        const char *vn = is_kbd
+          ? SDL_GetScancodeName(settings.keymap[redef_port][b])
+          : gpad_button_name(settings.gpadmap[redef_port][b]);
+        if (is_kbd && (!vn || vn[0] == 0)) vn = "-";
+        char rowlbl[24];
+        snprintf(rowlbl, sizeof(rowlbl), "%s%s", (row == sel) ? "> " : "  ",
+                 button_name(b));
+        put(r, lx, y, rowlbl, scale, (row == sel) ? hi : norm);
+        put(r, col_x, y, vn, scale, (row == sel) ? (is_kbd ? kbd : pad) : norm);
+        y += 24;
+      }
     }
     put(r, lx, y, (12 == sel) ? "> BACK" : "  BACK", scale, 12 == sel ? hi : norm);
     put(r, lx, y + 24, (13 == sel) ? "> RESET DEFAULTS" : "  RESET DEFAULTS",
         scale, 13 == sel ? hi : (SDL_Color){255, 150, 120, 255});
     if (capture_btn >= 0)
       put(r, lx, y + 54, "PRESS KEY OR GAMEPAD BUTTON (ESC CANCEL)", 1, hi);
+    else if (!is_kbd && !is_pad)
+      put(r, lx, y + 54, "ESC: BACK", 1, dim);
     else
-      put(r, lx, y + 54, "ENTER: SET KEY/PAD   ESC: BACK", 1, dim);
+      put(r, lx, y + 54, is_kbd ? "ENTER: SET KEY   ESC: BACK"
+                                : "ENTER: SET PAD   ESC: BACK", 1, dim);
   }
 
   SDL_RenderPresent(r);

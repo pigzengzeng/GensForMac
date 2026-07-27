@@ -679,19 +679,20 @@ static int pad_button_down(const pad_t *pd, SDL_GameControllerButton gb)
  *
  * The crucial detail: a plain 2-player game only reads input.pad[0] (player 1,
  * console port 0) and input.pad[4] (player 2, console port 1). Slots 1-3 and
- * 5-7 are only touched by 4-Way-Play-aware games. We therefore route the
- * keyboard and each gamepad through port_to_pad[] so player 2 lands on
- * input.pad[4] (a slot the game actually reads) instead of a dead Team-Player
- * sub-slot. Each gamepad is bound to the next free *menu* port (skipping the
- * keyboard's port); the same menu port is what the on-screen UI remaps, so the
- * remap and the live binding always agree.
+ * 5-7 are only touched by 4-Way-Play / Team-Player games. We route the keyboard
+ * and each gamepad through port_to_pad[] so player 2 lands on input.pad[4]
+ * (a slot the game actually reads) instead of a dead Team-Player sub-slot.
+ * Each gamepad is bound to a *menu* port; the same menu port is what the
+ * on-screen UI remaps, so the remap and the live binding always agree.
  *
- * A real Mega Drive does not distinguish "single-player" from "two-player": any
- * controller plugged into either port plays player 1 in a single-player game.
- * We honour that by ALSO OR-ing every connected gamepad into player 1's slot,
- * so any pad -- not just the first one -- can start a game and control player 1.
- * (The second and later pads still additionally drive player 2/3/... for
- * two-player games.) */
+ * A real Mega Drive does not distinguish "single-player" from "two-player":
+ * any controller can play player 1. But only ONE controller should drive
+ * player 1 at a time -- NOT every connected pad at once. So we pick the
+ * "active" controller as the one that most recently sent any input, and make
+ * THAT pad player 1; every other pad fills player 2 / 3 / ... in order. The
+ * keyboard always also contributes to player 1, so you can mix keyboard + pad.
+ * Result: grabbing either controller starts/plays a single-player game, while
+ * in a two-player game each controller keeps its own player slot. */
 int sdl_input_update(void)
 {
   static const int mask[12] = {
@@ -699,47 +700,74 @@ int sdl_input_update(void)
     INPUT_A, INPUT_B, INPUT_C, INPUT_X, INPUT_Y, INPUT_Z,
     INPUT_START, INPUT_MODE
   };
+  static long frame_ctr = 0;
+  static long pad_last[8];          /* last frame each pad produced input */
+  frame_ctr++;
 
   /* start from a clean slate so unconfigured slots report "no buttons" */
   for (int i = 0; i < MAX_DEVICES; i++) input.pad[i] = 0;
 
-  /* keyboard drives its menu port, translated to the real pad index */
+  /* keyboard drives its menu port, translated to the real pad index, and
+     always contributes to player 1 */
   int kp  = settings.keyboard_port;
   int kpad = port_to_pad[kp];
+  int kmask = 0;
   const Uint8 *k = SDL_GetKeyboardState(NULL);
   for (int b = 0; b < 12; b++) {
     SDL_Scancode sc = settings.keymap[kp][b];
     if (sc != SDL_SCANCODE_UNKNOWN && k[sc])
-      input.pad[kpad] |= mask[b];
+      kmask |= mask[b];
   }
+  input.pad[kpad] |= kmask;
+  int p1 = kpad;                    /* player 1's core slot */
 
-  /* Player 1's real core slot. A real Mega Drive lets ANY controller play
-     player 1 in a single-player game, so every gamepad is OR-ed into this slot
-     below -- not just the pad that happens to be enumerated first. */
-  int p1 = port_to_pad[kp];
-
-  /* Pad-to-port assignment. The FIRST pad shares the keyboard's menu port so
-     it drives PLAYER 1 alongside the keyboard -- this is what users expect in
-     a single-player game (previously pad 0 went to player 2 and appeared
-     completely dead in 1P games). Additional pads take the remaining menu
-     ports in order (pad 1 -> player 2, etc). */
+  /* menu port for each pad (pad 0 rides with the keyboard's port) */
   int order[NUM_PORTS];
   int no = 0;
-  order[no++] = kp;                          /* pad 0 rides with the keyboard */
+  order[no++] = kp;
   for (int mp = 0; mp < NUM_PORTS; mp++)
     if (mp != kp) order[no++] = mp;
 
-  for (int j = 0; j < npads && j < no; j++) {
-    int mp = order[j];                       /* menu port for this pad */
-    int pl = port_to_pad[mp];                /* real core pad index */
+  /* read each pad's current 12-bit button mask + remember last activity */
+  int pmask[8];
+  for (int j = 0; j < npads; j++) {
+    pmask[j] = 0;
     pad_t *pd = &pads[j];
+    int mp = (j < no) ? order[j] : j;
     for (int b = 0; b < 12; b++) {
       SDL_GameControllerButton gb = settings.gpadmap[mp][b];
-      if (gb >= 0 && pad_button_down(pd, gb)) {
-        input.pad[pl] |= mask[b];            /* normal routing (P1/P2/...) */
-        input.pad[p1] |= mask[b];            /* every pad also drives player 1 */
-      }
+      if (gb >= 0 && pad_button_down(pd, gb))
+        pmask[j] |= mask[b];
     }
+    if (pmask[j]) pad_last[j] = frame_ctr;
+  }
+
+  /* active player-1 controller = pad that most recently sent input
+     (ties keep the lower index = first enumerated pad). If no pad has ever
+     been used, default to pad 0 so a lone controller just works. */
+  int p1src = -1;
+  long best = -1;
+  for (int j = 0; j < npads; j++) {
+    if (pad_last[j] > best) { best = pad_last[j]; p1src = j; }
+  }
+  if (p1src < 0 && npads > 0) p1src = 0;
+
+  /* player slots to fill after player 1, in menu-port order (player 1's own
+     slot is excluded so it is never double-assigned) */
+  int slots[8], ns = 0;
+  for (int mp = 0; mp < NUM_PORTS; mp++) {
+    int core = port_to_pad[mp];
+    if (core != p1) slots[ns++] = core;
+  }
+
+  /* assign: the active pad -> player 1; all other pads -> player 2/3/... */
+  int si = 0;
+  for (int j = 0; j < npads; j++) {
+    if (pmask[j] == 0) continue;
+    if (j == p1src)
+      input.pad[p1] |= pmask[j];
+    else if (si < ns)
+      input.pad[slots[si++]] |= pmask[j];
   }
   return 1;
 }

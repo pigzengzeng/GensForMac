@@ -684,7 +684,14 @@ static int pad_button_down(const pad_t *pd, SDL_GameControllerButton gb)
  * input.pad[4] (a slot the game actually reads) instead of a dead Team-Player
  * sub-slot. Each gamepad is bound to the next free *menu* port (skipping the
  * keyboard's port); the same menu port is what the on-screen UI remaps, so the
- * remap and the live binding always agree. */
+ * remap and the live binding always agree.
+ *
+ * A real Mega Drive does not distinguish "single-player" from "two-player": any
+ * controller plugged into either port plays player 1 in a single-player game.
+ * We honour that by ALSO OR-ing every connected gamepad into player 1's slot,
+ * so any pad -- not just the first one -- can start a game and control player 1.
+ * (The second and later pads still additionally drive player 2/3/... for
+ * two-player games.) */
 int sdl_input_update(void)
 {
   static const int mask[12] = {
@@ -706,6 +713,11 @@ int sdl_input_update(void)
       input.pad[kpad] |= mask[b];
   }
 
+  /* Player 1's real core slot. A real Mega Drive lets ANY controller play
+     player 1 in a single-player game, so every gamepad is OR-ed into this slot
+     below -- not just the pad that happens to be enumerated first. */
+  int p1 = port_to_pad[kp];
+
   /* Pad-to-port assignment. The FIRST pad shares the keyboard's menu port so
      it drives PLAYER 1 alongside the keyboard -- this is what users expect in
      a single-player game (previously pad 0 went to player 2 and appeared
@@ -723,8 +735,10 @@ int sdl_input_update(void)
     pad_t *pd = &pads[j];
     for (int b = 0; b < 12; b++) {
       SDL_GameControllerButton gb = settings.gpadmap[mp][b];
-      if (gb >= 0 && pad_button_down(pd, gb))
-        input.pad[pl] |= mask[b];
+      if (gb >= 0 && pad_button_down(pd, gb)) {
+        input.pad[pl] |= mask[b];            /* normal routing (P1/P2/...) */
+        input.pad[p1] |= mask[b];            /* every pad also drives player 1 */
+      }
     }
   }
   return 1;

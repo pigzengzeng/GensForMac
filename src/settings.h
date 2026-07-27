@@ -39,6 +39,18 @@
 #define CT_3BUTTON  1
 #define CT_6BUTTON  2
 
+/* Per-port input SOURCE. Each on-screen port is driven by exactly one source:
+     PORT_DEV_KEYBOARD (-1) -> the keyboard (its own per-port keymap)
+     PORT_DEV_NONE     (-2) -> nothing (port is unused)
+     PORT_DEV_AUTO     (-3) -> resolved once at startup / on hot-plug into the
+                               next free gamepad, else keyboard (port 0) / none
+     0 .. n-1               -> that specific connected gamepad (pads[] index)
+   Because two ports can pick the SAME gamepad, "one pad controls two players"
+   (一控二) falls out for free: both ports read the same physical device. */
+#define PORT_DEV_KEYBOARD (-1)
+#define PORT_DEV_NONE     (-2)
+#define PORT_DEV_AUTO     (-3)
+
 /* Pseudo "buttons" for the analog triggers. SDL exposes LT/RT as AXES
    (SDL_CONTROLLER_AXIS_TRIGGERLEFT/RIGHT), not buttons, so they never emit
    SDL_CONTROLLERBUTTONDOWN and cannot appear in gpadmap with real button
@@ -59,7 +71,7 @@ typedef struct {
   int contrast;      /* -100 .. +100 */
 
   /* controllers */
-  int keyboard_port;             /* which port the keyboard drives (0-based) */
+  int port_dev[NUM_PORTS];       /* source per port: KEYBOARD / pad idx / NONE */
   int port_type[NUM_PORTS];      /* CT_* */
   SDL_Scancode keymap[NUM_PORTS][NUM_BUTTONS];          /* keyboard binding */
   SDL_GameControllerButton gpadmap[NUM_PORTS][NUM_BUTTONS]; /* gamepad binding */
@@ -81,6 +93,7 @@ void settings_load(void);     /* from ~/.gensmacrc, falls back to defaults */
 void settings_save(void);     /* to ~/.gensmacrc */
 void settings_apply(void);    /* push port types into the core's input map */
 void settings_reset_port(int port); /* restore one port to factory defaults */
+void settings_resolve_auto(void); /* turn PORT_DEV_AUTO into a concrete source */
 
 const char *button_name(int b);
 const char *gpad_button_name(SDL_GameControllerButton b);

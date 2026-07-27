@@ -25,7 +25,6 @@
 @property (nonatomic, strong) NSMenuItem *brightnessItem, *contrastItem;
 @property (nonatomic, strong) NSMutableArray<NSMenuItem *> *renderItems;
 @property (nonatomic, strong) NSMutableArray<NSMenuItem *> *scanlineItems;
-@property (nonatomic, strong) NSMutableArray<NSMenuItem *> *keyboardPortItems;
 @property (nonatomic, strong) NSMutableArray<NSMenuItem *> *gamepadInfoItem; /* single item */
 - (void)sync;
 @end
@@ -55,7 +54,6 @@ static MenuHandler *g_handler = nil;
 - (void)doContrastDown:(id)sender   { (void)sender; settings.contrast = MAX(-100, settings.contrast - 5); settings_save(); [self sync]; }
 
 /* ----- controllers ----- */
-- (void)doKeyboardPort:(id)sender { settings.keyboard_port = (int)[sender tag]; settings_apply(); settings_save(); [self sync]; }
 - (void)doConfigureControls:(id)sender { (void)sender; mac_action_open_controls(); }
 
 /* ----- emulation ----- */
@@ -87,8 +85,6 @@ static MenuHandler *g_handler = nil;
     _renderItems[i].state = (settings.render_mode == i) ? NSOnState : NSOffState;
   for (int i = 0; i < (int)_scanlineItems.count; i++)
     _scanlineItems[i].state = (settings.scanline == i) ? NSOnState : NSOffState;
-  for (int i = 0; i < (int)_keyboardPortItems.count; i++)
-    _keyboardPortItems[i].state = (settings.keyboard_port == i) ? NSOnState : NSOffState;
 
   [_brightnessItem setTitle:[NSString stringWithFormat:@"Brightness: %+d%%", settings.brightness]];
   [_contrastItem   setTitle:[NSString stringWithFormat:@"Contrast: %+d%%", settings.contrast]];
@@ -189,20 +185,9 @@ void mac_menu_init(void)
   NSMenu *ctrlMenu = [[NSMenu alloc] initWithTitle:@"Controllers"];
   [ctrlItem setSubmenu:ctrlMenu];
 
-  /* Keyboard Port submenu */
-  NSMenu *kbMenu = [[NSMenu alloc] initWithTitle:@"Keyboard Port"];
-  NSMenuItem *kbItem = [ctrlMenu addItemWithTitle:@"Keyboard Port" action:nil keyEquivalent:@""];
-  [kbItem setSubmenu:kbMenu];
-  g_handler.keyboardPortItems = [NSMutableArray array];
-  for (int p = 0; p < NUM_PORTS; p++) {
-    NSMenuItem *it = [kbMenu addItemWithTitle:[NSString stringWithFormat:@"Port %d", p + 1]
-                                       action:@selector(doKeyboardPort:) keyEquivalent:@""];
-    it.tag = p; it.target = g_handler;
-    [g_handler.keyboardPortItems addObject:it];
-  }
-
-  /* The on-screen key-redefinition UI (old SDL-rendered method). The native
-     menu only activates it; the actual per-key capture happens on screen. */
+  /* The on-screen key-redefinition UI (old SDL-rendered method). Each port's
+     input SOURCE (keyboard / a specific gamepad / none) and its per-button
+     bindings are configured there; the native menu only activates it. */
   [[ctrlMenu addItemWithTitle:@"Configure Controls..." action:@selector(doConfigureControls:) keyEquivalent:@""]
       setTarget:g_handler];
 

@@ -427,6 +427,24 @@ static void gamepads_enumerate(void)
       }
     }
   }
+
+  /* turn PORT_DEV_AUTO into a concrete source now that we know the pads:
+     port mp binds to gamepad mp if it exists, else port 0 falls back to the
+     keyboard and the rest stay NONE (unused). Already-explicit choices are
+     left untouched, so manual configuration survives hot-plug re-scans. */
+  settings_resolve_auto();
+}
+
+/* Resolve every PORT_DEV_AUTO source (see settings.h). Called from
+   gamepads_enumerate() after the pad list is rebuilt, and once at startup. */
+void settings_resolve_auto(void)
+{
+  for (int mp = 0; mp < NUM_PORTS; mp++) {
+    if (settings.port_dev[mp] != PORT_DEV_AUTO) continue;
+    if (mp < npads)            settings.port_dev[mp] = mp;          /* pad mp */
+    else if (mp == 0)          settings.port_dev[mp] = PORT_DEV_KEYBOARD;
+    else                       settings.port_dev[mp] = PORT_DEV_NONE;
+  }
 }
 
 /* find the pad that owns a given joystick instance id and is opened RAW
@@ -675,24 +693,21 @@ static int pad_button_down(const pad_t *pd, SDL_GameControllerButton gb)
 }
 
 /* Called by the emulation core once per frame via the osd_input_update()
- * hook (see osd.h). Reads keyboard + connected game controllers into input.pad.
+ * hook (see osd.h). Reads each on-screen port's chosen SOURCE into input.pad.
  *
- * The crucial detail: a plain 2-player game only reads input.pad[0] (player 1,
- * console port 0) and input.pad[4] (player 2, console port 1). Slots 1-3 and
- * 5-7 are only touched by 4-Way-Play / Team-Player games. We route the keyboard
- * and each gamepad through port_to_pad[] so player 2 lands on input.pad[4]
- * (a slot the game actually reads) instead of a dead Team-Player sub-slot.
- * Each gamepad is bound to a *menu* port; the same menu port is what the
- * on-screen UI remaps, so the remap and the live binding always agree.
+ * Every port (PORT 1..8 in the UI) is independently bound to a source stored in
+ * settings.port_dev[]: the keyboard, a specific connected gamepad (a pads[]
+ * index), or nothing. The binding is fixed and explicit -- no "most-recently
+ * used" magic -- so the on-screen setup and the live input always agree.
  *
- * A real Mega Drive does not distinguish "single-player" from "two-player":
- * any controller can play player 1. But only ONE controller should drive
- * player 1 at a time -- NOT every connected pad at once. So we pick the
- * "active" controller as the one that most recently sent any input, and make
- * THAT pad player 1; every other pad fills player 2 / 3 / ... in order. The
- * keyboard always also contributes to player 1, so you can mix keyboard + pad.
- * Result: grabbing either controller starts/plays a single-player game, while
- * in a two-player game each controller keeps its own player slot. */
+ * A plain 2-player game only reads input.pad[0] (player 1, console port 0) and
+ * input.pad[4] (player 2, console port 1). Slots 1-3 / 5-7 are only read by
+ * Team-Player / 4-Way Play games. port_to_pad[] translates each menu port into
+ * its real core slot, so player 2 reliably lands on input.pad[4].
+ *
+ * "One pad controls two players" (一控二) is automatic: if PORT 1 and PORT 2
+ * are both bound to the SAME gamepad, both core slots read that one device, so
+ * a single controller drives both players -- useful for some shmups / brawlers. */
 int sdl_input_update(void)
 {
   static const int mask[12] = {
@@ -700,74 +715,31 @@ int sdl_input_update(void)
     INPUT_A, INPUT_B, INPUT_C, INPUT_X, INPUT_Y, INPUT_Z,
     INPUT_START, INPUT_MODE
   };
-  static long frame_ctr = 0;
-  static long pad_last[8];          /* last frame each pad produced input */
-  frame_ctr++;
 
   /* start from a clean slate so unconfigured slots report "no buttons" */
   for (int i = 0; i < MAX_DEVICES; i++) input.pad[i] = 0;
 
-  /* keyboard drives its menu port, translated to the real pad index, and
-     always contributes to player 1 */
-  int kp  = settings.keyboard_port;
-  int kpad = port_to_pad[kp];
-  int kmask = 0;
   const Uint8 *k = SDL_GetKeyboardState(NULL);
-  for (int b = 0; b < 12; b++) {
-    SDL_Scancode sc = settings.keymap[kp][b];
-    if (sc != SDL_SCANCODE_UNKNOWN && k[sc])
-      kmask |= mask[b];
-  }
-  input.pad[kpad] |= kmask;
-  int p1 = kpad;                    /* player 1's core slot */
 
-  /* menu port for each pad (pad 0 rides with the keyboard's port) */
-  int order[NUM_PORTS];
-  int no = 0;
-  order[no++] = kp;
-  for (int mp = 0; mp < NUM_PORTS; mp++)
-    if (mp != kp) order[no++] = mp;
-
-  /* read each pad's current 12-bit button mask + remember last activity */
-  int pmask[8];
-  for (int j = 0; j < npads; j++) {
-    pmask[j] = 0;
-    pad_t *pd = &pads[j];
-    int mp = (j < no) ? order[j] : j;
-    for (int b = 0; b < 12; b++) {
-      SDL_GameControllerButton gb = settings.gpadmap[mp][b];
-      if (gb >= 0 && pad_button_down(pd, gb))
-        pmask[j] |= mask[b];
-    }
-    if (pmask[j]) pad_last[j] = frame_ctr;
-  }
-
-  /* active player-1 controller = pad that most recently sent input
-     (ties keep the lower index = first enumerated pad). If no pad has ever
-     been used, default to pad 0 so a lone controller just works. */
-  int p1src = -1;
-  long best = -1;
-  for (int j = 0; j < npads; j++) {
-    if (pad_last[j] > best) { best = pad_last[j]; p1src = j; }
-  }
-  if (p1src < 0 && npads > 0) p1src = 0;
-
-  /* player slots to fill after player 1, in menu-port order (player 1's own
-     slot is excluded so it is never double-assigned) */
-  int slots[8], ns = 0;
   for (int mp = 0; mp < NUM_PORTS; mp++) {
     int core = port_to_pad[mp];
-    if (core != p1) slots[ns++] = core;
-  }
+    int src  = settings.port_dev[mp];
 
-  /* assign: the active pad -> player 1; all other pads -> player 2/3/... */
-  int si = 0;
-  for (int j = 0; j < npads; j++) {
-    if (pmask[j] == 0) continue;
-    if (j == p1src)
-      input.pad[p1] |= pmask[j];
-    else if (si < ns)
-      input.pad[slots[si++]] |= pmask[j];
+    if (src == PORT_DEV_KEYBOARD) {
+      for (int b = 0; b < 12; b++) {
+        SDL_Scancode sc = settings.keymap[mp][b];
+        if (sc != SDL_SCANCODE_UNKNOWN && k[sc])
+          input.pad[core] |= mask[b];
+      }
+    } else if (src >= 0 && src < npads) {
+      pad_t *pd = &pads[src];
+      for (int b = 0; b < 12; b++) {
+        SDL_GameControllerButton gb = settings.gpadmap[mp][b];
+        if (gb >= 0 && pad_button_down(pd, gb))
+          input.pad[core] |= mask[b];
+      }
+    }
+    /* PORT_DEV_NONE (or a stale/disconnected index) contributes nothing */
   }
   return 1;
 }
@@ -811,11 +783,6 @@ static void handle_key(SDL_Keycode key)
     case SDLK_F5:  state_save_file(); break;
     case SDLK_F7:  state_load_file(); break;
     case SDLK_F6:  turbo_mode ^= 1;  break;
-    case SDLK_F12:
-      settings.keyboard_port = (settings.keyboard_port + 1) % NUM_PORTS;
-      settings_apply();
-      settings_save();
-      break;
     default: break;
   }
 }
@@ -931,27 +898,38 @@ int main(int argc, char **argv)
       mac_action_open_controls();                 /* ui_open() */
       if (!ui_is_open()) cok = 0;
       ui_render(vid.renderer);                     /* SCR_CTRL render */
-      ui_handle_key(SDLK_DOWN);                    /* -> port 2 */
-      ui_handle_key(SDLK_LEFT);                    /* change type */
-      ui_handle_key(SDLK_RETURN);                  /* enter SCR_REDEF (redef_port=1) */
-      ui_render(vid.renderer);                     /* SCR_REDEF render */
-      ui_handle_key(SDLK_RETURN);                  /* begin capture on button 0 */
-      ui_render(vid.renderer);                     /* capture-prompt render */
-      ui_handle_key(SDLK_KP1);                     /* bind a keyboard key */
-      ui_handle_key(SDLK_ESCAPE);                  /* back to SCR_CTRL */
-      /* capture a gamepad button too (verify the gamepad remap path) */
-      ui_handle_key(SDLK_DOWN);                    /* -> port 3 */
-      ui_handle_key(SDLK_RETURN);                  /* enter SCR_REDEF (redef_port=2) */
-      ui_handle_key(SDLK_RETURN);                  /* begin capture on button 0 */
+
+      /* cycle PORT 1's source: LEFT must move to a different source, RIGHT
+         must move it back. Robust to the number of gamepads present (AUTO
+         resolution may have started PORT 1 on a gamepad, not the keyboard). */
+      int src_before = settings.port_dev[0];
+      ui_handle_key(SDLK_LEFT);
+      int src_afterL = settings.port_dev[0];
+      if (src_afterL == src_before) cok = 0;
+      ui_handle_key(SDLK_RIGHT);
+      if (settings.port_dev[0] != src_before) cok = 0;
+
+      /* PORT 2 (sel -> 1): enter REDEF, bind keyboard key to UP (button 0) */
+      ui_handle_key(SDLK_DOWN);                    /* sel 0 -> 1 (PORT 2) */
+      ui_handle_key(SDLK_RETURN);                  /* enter SCR_REDEF redef_port=1 */
+      ui_handle_key(SDLK_DOWN);                    /* sel 0 (TYPE) -> 1 (UP row) */
+      ui_handle_key(SDLK_RETURN);                  /* begin capture, btn 0 */
+      ui_handle_key(SDLK_KP1);                     /* bind KP_1 */
+      ui_handle_key(SDLK_ESCAPE);                  /* back to SCR_CTRL (sel=1) */
+
+      /* PORT 3 (sel -> 2): bind gamepad A to UP (btn 0), RT to DOWN (btn 1) */
+      ui_handle_key(SDLK_DOWN);                    /* sel 1 -> 2 (PORT 3) */
+      ui_handle_key(SDLK_RETURN);                  /* enter SCR_REDEF redef_port=2 */
+      ui_handle_key(SDLK_DOWN);                    /* sel 0 -> 1 (UP row) */
+      ui_handle_key(SDLK_RETURN);                  /* capture btn 0 */
       ui_handle_button(SDL_CONTROLLER_BUTTON_A);   /* bind gamepad A */
-      /* capture a TRIGGER pseudo button too (LT/RT are axes, stored as
-         GBTN_LTRIGGER/RTRIGGER; verify they flow through the same path) */
-      ui_handle_key(SDLK_DOWN);                    /* -> button 1 */
-      ui_handle_key(SDLK_RETURN);                  /* begin capture */
+      ui_handle_key(SDLK_DOWN);                    /* sel 1 -> 2 (DOWN row) */
+      ui_handle_key(SDLK_RETURN);                  /* capture btn 1 */
       ui_handle_button(GBTN_RTRIGGER);             /* bind right trigger */
-      ui_handle_key(SDLK_ESCAPE);                  /* back to SCR_CTRL */
+      ui_handle_key(SDLK_ESCAPE);                  /* back to SCR_CTRL (sel=2) */
       ui_handle_key(SDLK_ESCAPE);                  /* close overlay */
       if (ui_is_open()) cok = 0;
+
       /* verify the bindings actually landed in the settings table */
       if (settings.keymap[1][0] != SDL_SCANCODE_KP_1) cok = 0;
       if (settings.gpadmap[2][0] != SDL_CONTROLLER_BUTTON_A) cok = 0;
@@ -962,7 +940,8 @@ int main(int argc, char **argv)
       if (settings.gpadmap[1][BTN_X] != SDL_CONTROLLER_BUTTON_LEFTSHOULDER) cok = 0;
       if (settings.gpadmap[1][BTN_Z] != SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) cok = 0;
       fprintf(stderr, "[selftest] CONTROLS: %s\n",
-              cok ? "PASS: overlay + key/pad capture + reset OK" : "FAIL: overlay/capture/reset");
+              cok ? "PASS: overlay + source cycle + key/pad capture + reset OK"
+                  : "FAIL: overlay/source/capture/reset");
     }
 
     audio_shutdown();

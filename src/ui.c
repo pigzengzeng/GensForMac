@@ -10,13 +10,19 @@ extern t_settings settings;   /* defined in settings.c */
 /* Only the controller-setup screens live here now. Every other setting
    (video, emulation) is handled by the native macOS menu bar; this overlay
    is opened from Controllers > "Configure Controls..." and lets the user
-   redefine keys the old on-screen way. */
+   bind keys the old on-screen way.
+
+   Model: each on-screen PORT (1..8) has its own SOURCE -- the keyboard, a
+   specific connected gamepad, or NONE -- plus its own keyboard/gamepad button
+   bindings and controller type. Two ports may pick the SAME gamepad, which is
+   how "one pad controls two players" (一控二) is achieved. */
+
 typedef enum { SCR_CTRL, SCR_REDEF } screen_t;
 
 static screen_t screen = SCR_CTRL;
 static int sel = 0;           /* row in current screen (port row / button row) */
 static int redef_port = 0;   /* port being redefined */
-static int capture_btn = -1; /* -1 = not capturing, else button index */
+static int capture_btn = -1; /* -1 = not capturing, else button index 0..11 */
 static int open = 0;
 
 void ui_init(void) { open = 0; screen = SCR_CTRL; sel = 0; capture_btn = -1; }
@@ -24,14 +30,43 @@ int  ui_is_open(void) { return open; }
 void ui_open(void)  { open = 1; screen = SCR_CTRL; sel = 0; redef_port = 0; capture_btn = -1; }
 void ui_close(void) { open = 0; }
 
+/* ---------- source (per-port input device) helpers ---------- */
+/* Option list for the source selector: [0]=KEYBOARD, [1..npads]=pad idx,
+   [npads+1]=NONE. Cycling wraps through these. */
+static int src_option_count(void) { return 1 + gens_pad_count() + 1; }
+
+static int src_option_to_dev(int idx)
+{
+  int n = gens_pad_count();
+  if (idx <= 0)      return PORT_DEV_KEYBOARD;
+  if (idx <= n)      return idx - 1;          /* pad index */
+  return PORT_DEV_NONE;
+}
+
+static int dev_to_src_option(int dev)
+{
+  int n = gens_pad_count();
+  if (dev == PORT_DEV_KEYBOARD) return 0;
+  if (dev == PORT_DEV_NONE)     return 1 + n;
+  if (dev >= 0 && dev < n)      return dev + 1;
+  return 0;                                     /* disconnected pad -> keyboard */
+}
+
+static const char *dev_label(int dev)
+{
+  if (dev == PORT_DEV_KEYBOARD) return "KEYBOARD";
+  if (dev == PORT_DEV_NONE)     return "NONE";
+  if (dev >= 0 && dev < gens_pad_count()) return gens_pad_label(dev);
+  return "?";
+}
+
 /* ---------------------------- key handling ---------------------------- */
 void ui_handle_key(SDL_Keycode key)
 {
   /* capture mode: next key becomes the keyboard binding (Esc cancels) */
   if (capture_btn >= 0) {
     if (key == SDLK_ESCAPE) { capture_btn = -1; return; }
-    settings.keymap[redef_port][capture_btn] =
-        SDL_GetScancodeFromKey(key);
+    settings.keymap[redef_port][capture_btn] = SDL_GetScancodeFromKey(key);
     capture_btn = -1;
     settings_save();
     return;
@@ -40,13 +75,15 @@ void ui_handle_key(SDL_Keycode key)
   switch (screen) {
     case SCR_CTRL:
       if (key == SDLK_ESCAPE) { ui_close(); break; }
-      if (key == SDLK_UP)        sel = (sel + 8) % 9;
+      if (key == SDLK_UP)        sel = (sel + 8) % 9;     /* 8 ports + DONE */
       else if (key == SDLK_DOWN) sel = (sel + 1) % 9;
       else if (key == SDLK_LEFT || key == SDLK_RIGHT) {
         if (sel < 8) {
           int d = (key == SDLK_RIGHT) ? 1 : -1;
-          settings.port_type[sel] = (settings.port_type[sel] + d + 3) % 3;
-          settings_apply();
+          int idx = dev_to_src_option(settings.port_dev[sel]);
+          int cnt = src_option_count();
+          idx = (idx + d + cnt) % cnt;
+          settings.port_dev[sel] = src_option_to_dev(idx);
           settings_save();
         }
       }
@@ -58,12 +95,13 @@ void ui_handle_key(SDL_Keycode key)
 
     case SCR_REDEF:
       if (key == SDLK_ESCAPE) { screen = SCR_CTRL; sel = redef_port; capture_btn = -1; break; }
-      if (key == SDLK_UP)        sel = (sel + 13) % 14;
-      else if (key == SDLK_DOWN) sel = (sel + 1) % 14;
+      if (key == SDLK_UP)        sel = (sel + 14) % 15;
+      else if (key == SDLK_DOWN) sel = (sel + 1) % 15;
       else if (key == SDLK_RETURN || key == SDLK_SPACE) {
-        if (sel == 12) { screen = SCR_CTRL; sel = redef_port; }   /* BACK */
-        else if (sel == 13) { settings_reset_port(redef_port); }  /* RESET DEFAULTS */
-        else { capture_btn = sel; }   /* begin capture; next key OR pad button binds */
+        if (sel == 0) { /* TYPE row: no capture */ }
+        else if (sel == 13) { screen = SCR_CTRL; sel = redef_port; }   /* BACK */
+        else if (sel == 14) { settings_reset_port(redef_port); }        /* RESET */
+        else { capture_btn = sel - 1; }   /* button index 0..11; next key/pad binds */
       }
       break;
   }
@@ -108,75 +146,117 @@ void ui_render(SDL_Renderer *r)
   int rx = cx + 270;           /* right margin for values */
 
   if (screen == SCR_CTRL) {
-    put(r, cx - font_width("CONTROL PAD SETUP", scale)/2, 36,
+    put(r, cx - font_width("CONTROL PAD SETUP", scale)/2, 30,
         "CONTROL PAD SETUP", scale, title);
-    int y = 110;
+    int y = 96;
     for (int i = 0; i < 8; i++) {
       char lbl[48];
-      snprintf(lbl, sizeof(lbl), "PORT %d%s", i + 1,
-               (i == settings.keyboard_port) ? " (KEYBOARD)" : "");
-      put(r, lx, y, lbl, scale, i == sel ? hi : (i == settings.keyboard_port ? kbd : norm));
-      const char *tname = port_type_name(settings.port_type[i]);
-      put(r, rx - font_width(tname, scale), y, tname, scale, i == sel ? hi : norm);
-      y += 34;
+      snprintf(lbl, sizeof(lbl), "PORT %d", i + 1);
+      put(r, lx, y, lbl, scale, (i == sel) ? hi : norm);
+
+      /* controller type, dim, just right of the label */
+      char t[40];
+      snprintf(t, sizeof(t), "[%s]", port_type_name(settings.port_type[i]));
+      put(r, lx + 96, y + 4, t, 1, dim);
+
+      /* source on the right */
+      const char *sn = dev_label(settings.port_dev[i]);
+      SDL_Color scol = (settings.port_dev[i] == PORT_DEV_KEYBOARD) ? kbd
+                     : (settings.port_dev[i] == PORT_DEV_NONE)     ? dim : pad;
+      put(r, rx - font_width(sn, scale), y, sn, scale, (i == sel) ? hi : scol);
+      y += 32;
     }
     put(r, lx, y, "DONE", scale, 8 == sel ? hi : norm);
-    put(r, lx, y + 36, "LEFT/RIGHT: TYPE   ENTER: KEYS   ESC: DONE", 1, dim);
+    put(r, lx, y + 34, "LEFT/RIGHT: SOURCE   ENTER: KEYS   ESC: DONE", 1, dim);
 
-    /* ---- live gamepad diagnostics: is the pad seen? does it send input? --- */
+    /* ---- live gamepad diagnostics: which port(s) does each pad drive? ---- */
     {
-      int dy = y + 60;
+      int dy = y + 58;
       int n = gens_pad_count();
-      char buf[96];
+      char buf[160];
       if (n == 0) {
         put(r, lx, dy, "GAMEPADS: NONE DETECTED BY SDL", 1,
             (SDL_Color){255, 120, 120, 255});
       } else {
         snprintf(buf, sizeof(buf), "GAMEPADS: %d DETECTED", n);
         put(r, lx, dy, buf, 1, pad);
-        /* pad 0 shares the keyboard's port (player 1); later pads take the
-           remaining menu ports in order -- mirror of sdl_input_update() */
-        int order[8], no = 0;
-        order[no++] = settings.keyboard_port;
-        for (int mp = 0; mp < 8; mp++)
-          if (mp != settings.keyboard_port) order[no++] = mp;
-        for (int i = 0; i < n && i < 4; i++) {
+        for (int i = 0; i < n; i++) {
           dy += 18;
+          /* collect the ports that source this pad */
+          char ports[64] = "";
+          int cnt = 0;
+          for (int mp = 0; mp < NUM_PORTS; mp++) {
+            if (settings.port_dev[mp] == i) {
+              char tmp[10];
+              snprintf(tmp, sizeof(tmp), "%sPORT %d", cnt ? ", " : "", mp + 1);
+              strncat(ports, tmp, sizeof(ports) - strlen(ports) - 1);
+              cnt++;
+            }
+          }
           int on = gens_pad_pressed(i);
-          snprintf(buf, sizeof(buf), "%d: %s -> PORT %d %s", i + 1,
-                   gens_pad_label(i), order[i] + 1, on ? "[INPUT!]" : "");
+          snprintf(buf, sizeof(buf), "%s -> %s%s", gens_pad_label(i),
+                   ports[0] ? ports : "(unmapped)",
+                   on ? "  [INPUT!]" : "");
           put(r, lx, dy, buf, 1, on ? hi : dim);
+        }
+        /* keyboard-sourced ports */
+        char kbuf[64] = ""; int kc = 0;
+        for (int mp = 0; mp < NUM_PORTS; mp++)
+          if (settings.port_dev[mp] == PORT_DEV_KEYBOARD) {
+            char tmp[10];
+            snprintf(tmp, sizeof(tmp), "%sPORT %d", kc ? ", " : "", mp + 1);
+            strncat(kbuf, tmp, sizeof(kbuf) - strlen(kbuf) - 1);
+            kc++;
+          }
+        if (kc) {
+          dy += 18;
+          snprintf(buf, sizeof(buf), "KEYBOARD -> %s", kbuf);
+          put(r, lx, dy, buf, 1, kbd);
         }
       }
     }
   }
   else if (screen == SCR_REDEF) {
-    char hdr[48];
-    snprintf(hdr, sizeof(hdr), "PORT %d - REDEFINE%s", redef_port + 1,
-             (redef_port == settings.keyboard_port) ? " (KEYBOARD)" : " (GAMEPAD)");
-    put(r, cx - font_width(hdr, scale)/2, 32, hdr, scale, title);
-    int kx = cx - 170;        /* KEY column: left-aligned, clear of button name */
-    int px = cx + 30;         /* PAD column: left-aligned, clear of KEY */
+    char hdr[64];
+    snprintf(hdr, sizeof(hdr), "PORT %d - REDEFINE  (SRC: %s)", redef_port + 1,
+             dev_label(settings.port_dev[redef_port]));
+    put(r, cx - font_width(hdr, scale)/2, 28, hdr, scale, title);
+
+    /* row 0: controller type */
+    put(r, lx, 64,
+        (sel == 0) ? "> TYPE" : "  TYPE", scale, (sel == 0) ? hi : norm);
+    put(r, rx - font_width(port_type_name(settings.port_type[redef_port]), scale),
+        64, port_type_name(settings.port_type[redef_port]), scale,
+        (sel == 0) ? hi : norm);
+    put(r, lx + 150, 68, "LEFT/RIGHT", 1, dim);
+
     /* column headers */
-    put(r, kx, 70, "KEY", 1, kbd);
-    put(r, px, 70, "PAD", 1, pad);
-    int y = 84;
+    int kx = cx - 150;        /* KEY column */
+    int px = cx + 40;         /* PAD column */
+    put(r, kx, 90, "KEY", 1, kbd);
+    put(r, px, 90, "PAD", 1, pad);
+
+    int y = 108;
     for (int b = 0; b < 12; b++) {
+      int row = b + 1;        /* row index in SEL space */
       const char *kn = SDL_GetScancodeName(settings.keymap[redef_port][b]);
       if (!kn || kn[0] == 0) kn = "-";
       const char *pn = gpad_button_name(settings.gpadmap[redef_port][b]);
-      put(r, lx, y, (char *)button_name(b), scale, b == sel ? hi : norm);
-      put(r, kx, y, kn, scale, b == sel ? kbd : norm);
-      put(r, px, y, pn, scale, b == sel ? pad : norm);
-      y += 27;
+      char rowlbl[24];
+      snprintf(rowlbl, sizeof(rowlbl), "%s%s", (row == sel) ? "> " : "  ",
+               button_name(b));
+      put(r, lx, y, rowlbl, scale, (row == sel) ? hi : norm);
+      put(r, kx, y, kn, scale, (row == sel) ? kbd : norm);
+      put(r, px, y, pn, scale, (row == sel) ? pad : norm);
+      y += 24;
     }
-    put(r, lx, y, "BACK", scale, 12 == sel ? hi : norm);
-    put(r, lx, y + 26, "RESET DEFAULTS", scale, 13 == sel ? hi :
-        (SDL_Color){255, 150, 120, 255});
+    put(r, lx, y, (13 == sel) ? "> BACK" : "  BACK", scale, 13 == sel ? hi : norm);
+    put(r, lx, y + 24, (14 == sel) ? "> RESET DEFAULTS" : "  RESET DEFAULTS",
+        scale, 14 == sel ? hi : (SDL_Color){255, 150, 120, 255});
     if (capture_btn >= 0)
-      put(r, lx, y + 56, "PRESS KEY OR GAMEPAD BUTTON (ESC CANCEL)", 1, hi);
+      put(r, lx, y + 54, "PRESS KEY OR GAMEPAD BUTTON (ESC CANCEL)", 1, hi);
     else
-      put(r, lx, y + 56, "ENTER: SET   ESC: BACK   RESET: RESTORE THIS PORT", 1, dim);
+      put(r, lx, y + 54, "LEFT/RIGHT: TYPE   ENTER: SET   ESC: BACK", 1, dim);
   }
 
   SDL_RenderPresent(r);

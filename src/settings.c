@@ -97,12 +97,6 @@ static void set_keymap_defaults(int p)
   settings.keymap[p][BTN_MODE]  = SDL_SCANCODE_RSHIFT;
 }
 
-static void clear_keymap(int p)
-{
-  for (int b = 0; b < NUM_BUTTONS; b++)
-    settings.keymap[p][b] = SDL_SCANCODE_UNKNOWN;
-}
-
 /* Default gamepad mapping. ALL six Mega Drive face buttons (A B C X Y Z) plus
    START and MODE are bound, so every button works out of the box on a modern
    pad -- previously X and Z were left unbound, which is why "only four face
@@ -133,16 +127,17 @@ void settings_init_defaults(void)
   settings.greyscale   = 0;
   settings.brightness  = 0;
   settings.contrast    = 0;
-  settings.keyboard_port = 0;
 
-  /* PORT 1/2 default to 6-BUTTON so all six face buttons + MODE are read by
-     the core (3-button mode reads only A/B/C/START + dpad). */
   for (int p = 0; p < NUM_PORTS; p++) {
+    /* AUTO is resolved into a concrete source (keyboard / a specific gamepad /
+       none) by settings_resolve_auto() after pads are enumerated, so a freshly
+       plugged controller "just works" as player 1 without manual setup. */
+    settings.port_dev[p]  = PORT_DEV_AUTO;
     settings.port_type[p] = (p < 2) ? CT_6BUTTON : CT_NONE;
-    clear_keymap(p);
+    set_keymap_defaults(p);   /* every port gets a keyboard layout so any port
+                                 can be switched to KEYBOARD instantly */
     set_gpadmap_defaults(p);
   }
-  set_keymap_defaults(0);   /* keyboard drives PORT 1 by default */
 }
 
 /* Restore ONE port's controller bindings + type to the factory defaults.
@@ -154,8 +149,8 @@ void settings_reset_port(int p)
   if (p < 0 || p >= NUM_PORTS) return;
   settings.port_type[p] = (p < 2) ? CT_6BUTTON : CT_NONE;
   set_gpadmap_defaults(p);
-  if (p == settings.keyboard_port) set_keymap_defaults(p);
-  else                             clear_keymap(p);
+  set_keymap_defaults(p);   /* any port may be switched to KEYBOARD, so every
+                               port keeps a usable keyboard layout */
   settings_apply();
   settings_save();
 }
@@ -191,7 +186,11 @@ void settings_load(void)
     else if (!strcmp(key, "greyscale"))    settings.greyscale = val;
     else if (!strcmp(key, "brightness"))   settings.brightness = val;
     else if (!strcmp(key, "contrast"))     settings.contrast = val;
-    else if (!strcmp(key, "keyboard_port"))settings.keyboard_port = val;
+    else if (!strcmp(key, "keyboard_port"))settings.port_dev[0] = PORT_DEV_KEYBOARD; /* legacy rc */
+    else if (!strncmp(key, "port_dev", 8)) {
+      int p = atoi(key + 8);
+      if (p >= 0 && p < NUM_PORTS) settings.port_dev[p] = val;
+    }
     else if (!strncmp(key, "port_type", 9)) {
       int p = atoi(key + 9);
       if (p >= 0 && p < NUM_PORTS) settings.port_type[p] = val;
@@ -221,8 +220,10 @@ void settings_load(void)
   }
   fclose(f);
 
-  if (settings.keyboard_port < 0 || settings.keyboard_port >= NUM_PORTS)
-    settings.keyboard_port = 0;
+  /* clamp any out-of-range source to AUTO so it gets re-resolved below */
+  for (int p = 0; p < NUM_PORTS; p++)
+    if (settings.port_dev[p] < PORT_DEV_NONE)   /* below NONE(-2) is invalid */
+      settings.port_dev[p] = PORT_DEV_AUTO;
 }
 
 void settings_save(void)
@@ -240,7 +241,8 @@ void settings_save(void)
   fprintf(f, "greyscale=%d\n",    settings.greyscale);
   fprintf(f, "brightness=%d\n",   settings.brightness);
   fprintf(f, "contrast=%d\n",     settings.contrast);
-  fprintf(f, "keyboard_port=%d\n",settings.keyboard_port);
+  for (int p = 0; p < NUM_PORTS; p++)
+    fprintf(f, "port_dev%d=%d\n", p, settings.port_dev[p]);
   for (int p = 0; p < NUM_PORTS; p++)
     fprintf(f, "port_type%d=%d\n", p, settings.port_type[p]);
   for (int p = 0; p < NUM_PORTS; p++)

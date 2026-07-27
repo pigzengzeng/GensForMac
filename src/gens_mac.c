@@ -538,44 +538,58 @@ const char *gens_pad_label(int i)
 }
 
 /* non-zero when the pad currently reports ANY pressed button / hat / big axis
-   deflection -- lets the user see immediately whether SDL receives input. */
+   deflection -- lets the user see immediately whether SDL receives input.
+   The result is debounced (hysteresis) so a single-frame glitch -- cheap
+   hardware axis jitter, button bounce -- cannot flip the on-screen diagnostic
+   row, which otherwise flickers. Turning on needs DEB_ON consecutive true
+   frames; turning off needs DEB_OFF consecutive false frames. */
+#define PAD_DEB_ON  3
+#define PAD_DEB_OFF 5
 int gens_pad_pressed(int i)
 {
   if (i < 0 || i >= npads) return 0;
   pad_t *pd = &pads[i];
+  int cur = 0;
+
   if (pd->gc) {
-    for (int b = 0; b < SDL_CONTROLLER_BUTTON_MAX; b++)
-      if (SDL_GameControllerGetButton(pd->gc, (SDL_GameControllerButton)b)) return 1;
-    if (abs(SDL_GameControllerGetAxis(pd->gc, SDL_CONTROLLER_AXIS_LEFTX)) > 16000) return 1;
-    if (abs(SDL_GameControllerGetAxis(pd->gc, SDL_CONTROLLER_AXIS_LEFTY)) > 16000) return 1;
-    if (SDL_GameControllerGetAxis(pd->gc, SDL_CONTROLLER_AXIS_TRIGGERLEFT)  > 8000) return 1;
-    if (SDL_GameControllerGetAxis(pd->gc, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 8000) return 1;
+    if (!cur) {
+      for (int b = 0; b < SDL_CONTROLLER_BUTTON_MAX; b++)
+        if (SDL_GameControllerGetButton(pd->gc, (SDL_GameControllerButton)b)) { cur = 1; break; }
+    }
+    if (!cur && abs(SDL_GameControllerGetAxis(pd->gc, SDL_CONTROLLER_AXIS_LEFTX)) > 16000) cur = 1;
+    if (!cur && abs(SDL_GameControllerGetAxis(pd->gc, SDL_CONTROLLER_AXIS_LEFTY)) > 16000) cur = 1;
+    if (!cur && SDL_GameControllerGetAxis(pd->gc, SDL_CONTROLLER_AXIS_TRIGGERLEFT)  > 8000) cur = 1;
+    if (!cur && SDL_GameControllerGetAxis(pd->gc, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 8000) cur = 1;
     /* also catch a d-pad that lives on the underlying joystick's hat
        (see pad_button_down) so pressing directions lights the diagnostic */
     SDL_Joystick *j = SDL_GameControllerGetJoystick(pd->gc);
-    if (j) {
+    if (!cur && j) {
       int nh = SDL_JoystickNumHats(j);
       for (int h = 0; h < nh; h++)
-        if (SDL_JoystickGetHat(j, h) != SDL_HAT_CENTERED) return 1;
+        if (SDL_JoystickGetHat(j, h) != SDL_HAT_CENTERED) { cur = 1; break; }
     }
   } else if (pd->joy) {
     int nb = SDL_JoystickNumButtons(pd->joy);
-    for (int b = 0; b < nb; b++)
-      if (SDL_JoystickGetButton(pd->joy, b)) return 1;
+    if (!cur) for (int b = 0; b < nb; b++)
+      if (SDL_JoystickGetButton(pd->joy, b)) { cur = 1; break; }
     int nh = SDL_JoystickNumHats(pd->joy);
-    for (int h = 0; h < nh; h++)
-      if (SDL_JoystickGetHat(pd->joy, h) != SDL_HAT_CENTERED) return 1;
-    /* Detect deflection relative to each axis' sampled resting value, not a
-       fixed absolute threshold. Cheap raw joysticks (e.g. GreenAsia) have
-       analog sticks/axes that idle away from centre and jitter; the old
-       abs(axis) > 16000 test flagged them every frame, so the on-screen
-       diagnostic row flickered. Comparing against raw_idle[] also lets the
-       diagnostic light up for a d-pad that lives on a non-zero axis (e.g. 2/3). */
+    if (!cur) for (int h = 0; h < nh; h++)
+      if (SDL_JoystickGetHat(pd->joy, h) != SDL_HAT_CENTERED) { cur = 1; break; }
+    /* Deflection relative to each axis' sampled resting value (raw_idle[]),
+       with a high threshold. Cheap raw joysticks (e.g. GreenAsia) have analog
+       sticks/axes that idle off-centre and jitter; comparing against idle[]
+       stops the common "rests away from centre" false-positive, and the high
+       threshold ignores the small wander while still catching a real full
+       deflection (a d-pad on a non-zero axis such as 2/3 reaches +/-32768). */
     int na = SDL_JoystickNumAxes(pd->joy);
-    for (int a = 0; a < na && a < 8; a++)
-      if (abs(SDL_JoystickGetAxis(pd->joy, a) - pd->raw_idle[a]) > 16000) return 1;
+    if (!cur) for (int a = 0; a < na && a < 8; a++)
+      if (abs(SDL_JoystickGetAxis(pd->joy, a) - pd->raw_idle[a]) > 28000) { cur = 1; break; }
   }
-  return 0;
+
+  static int st[8];   /* hysteresis counter per pad */
+  if (cur) { if (st[i] <  PAD_DEB_ON)  st[i]++; }
+  else     { if (st[i] > -PAD_DEB_OFF) st[i]--; }
+  return st[i] > 0;
 }
 
 /* best-effort mapping from a Game Controller button enum to a raw joystick
